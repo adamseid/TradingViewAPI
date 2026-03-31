@@ -85,7 +85,6 @@ STOCK_COLUMNS = [
 CRYPTO_COLUMNS = [
     "name",
     "exchange",
-    "market_cap_basic",
 ]
 
 class TradingViewClient:
@@ -110,186 +109,7 @@ class TradingViewClient:
         rows.extend(self._get_crypto_rows(seen))
 
         return rows
-
-    def _get_stock_rows(self, seen: set) -> List[Dict[str, Any]]:
-        rows: List[Dict[str, Any]] = []
-        sp500 = {symbol.upper() for symbol in SP500_SYMBOLS}
-
-        for screener in STOCK_SCREENERS:
-            try:
-                query = (
-                    Query()
-                    .select(*STOCK_COLUMNS, "market_cap_basic")
-                    .set_markets(screener)
-                    .order_by("market_cap_basic", ascending=False)
-                    .limit(5000)
-                )
-
-                _, df = query.get_scanner_data()
-
-            except Exception:
-                logger.exception(
-                    "TradingView screener query failed for screener=%s",
-                    screener,
-                )
-                continue
-
-            if df is None or df.empty:
-                continue
-
-            for _, row in df.iterrows():
-                ticker = self._extract_symbol(row.get("ticker"))
-                exchange = self._clean_value(row.get("exchange"))
-                market_cap = row.get("market_cap_basic")
-
-                if not ticker or not exchange:
-                    continue
-
-                ticker_upper = ticker.upper()
-
-                if ticker_upper not in sp500:
-                    continue
-
-                unique_key = (ticker_upper, str(exchange).upper(), screener)
-                if unique_key in seen:
-                    continue
-
-                seen.add(unique_key)
-
-                rows.append({
-                    "ticker": ticker_upper,
-                    "name": self._clean_value(row.get("name")),
-                    "screener": screener,
-                    "exchange": exchange,
-                    "category": self._clean_value(row.get("type")),
-                    "sector": self._clean_value(row.get("sector")),
-                    "industry": self._clean_value(row.get("industry")),
-                    "image_url": None,
-                    "market_cap_basic": market_cap if market_cap is not None else 0,
-                })
-
-        rows.sort(key=lambda x: x["market_cap_basic"], reverse=True)
-
-        for row in rows:
-            row.pop("market_cap_basic", None)
-
-        return rows
-
-    def _get_crypto_rows(self, seen: set) -> List[Dict[str, Any]]:
-        rows: List[Dict[str, Any]] = []
-        desired_symbols = {symbol.upper() for symbol in TOP_50_CRYPTO_BASES}
-        buckets: Dict[str, List[Dict[str, Any]]] = {symbol: [] for symbol in TOP_50_CRYPTO_BASES}
-
-        try:
-            query = (
-                Query()
-                .select(*CRYPTO_COLUMNS)
-                .set_markets("crypto")
-                .order_by("market_cap_basic", ascending=False)
-                .limit(5000)
-            )
-
-            _, df = query.get_scanner_data()
-
-            if df is None or df.empty:
-                return rows
-
-            for _, row in df.iterrows():
-                ticker = self._extract_symbol(row.get("ticker"))
-                exchange = self._clean_value(row.get("exchange"))
-                name = self._clean_value(row.get("name"))
-
-                if not ticker or not exchange:
-                    continue
-
-                ticker = ticker.upper()
-                exchange = exchange.upper()
-
-                # Only keep USD pairs, e.g. BTCUSD, ETHUSD
-                if not ticker.endswith("USD"):
-                    continue
-
-                base_symbol = ticker[:-3]
-                if base_symbol not in desired_symbols:
-                    continue
-
-                buckets[base_symbol].append({
-                    "ticker": ticker,
-                    "name": name,
-                    "exchange": exchange,
-                })
-
-            for base_symbol in TOP_50_CRYPTO_BASES:
-                candidates = buckets.get(base_symbol, [])
-                if not candidates:
-                    logger.warning(
-                        "No TradingView USD pair found for top-50 crypto symbol=%s",
-                        base_symbol,
-                    )
-                    continue
-
-                candidates.sort(
-                    key=lambda item: (
-                        PREFERRED_CRYPTO_USD_EXCHANGES.index(item["exchange"])
-                        if item["exchange"] in PREFERRED_CRYPTO_USD_EXCHANGES
-                        else 999,
-                        item["exchange"],
-                    )
-                )
-
-                chosen = candidates[0]
-                unique_key = (chosen["ticker"], chosen["exchange"], "crypto")
-                if unique_key in seen:
-                    continue
-
-                seen.add(unique_key)
-
-                rows.append({
-                    "ticker": chosen["ticker"],   # BTCUSD, ETHUSD, etc.
-                    "name": chosen["name"],
-                    "screener": "crypto",
-                    "exchange": chosen["exchange"],
-                    "category": "crypto",
-                    "sector": None,
-                    "industry": None,
-                    "image_url": None,
-                })
-
-            return rows
-
-        except Exception as exc:
-            raise RuntimeError(f"Failed to fetch crypto rows: {str(exc)}") from exc
-
-    @staticmethod
-    def _extract_symbol(ticker_value: Any) -> Optional[str]:
-        if ticker_value is None:
-            return None
-
-        ticker_str = str(ticker_value).strip()
-        if ":" in ticker_str:
-            return ticker_str.split(":", 1)[1]
-        return ticker_str
-
-    @staticmethod
-    def _clean_value(value: Any) -> Optional[str]:
-        if value is None:
-            return None
-
-        value_str = str(value).strip()
-        if value_str == "" or value_str.lower() == "nan":
-            return None
-
-        return value_str
-
-    @staticmethod
-    def build_symbol_key(exchange: str, ticker: str) -> str:
-        return f"{str(exchange).upper()}:{str(ticker).upper()}"
-
-    @staticmethod
-    def chunked(items: List[Any], size: int) -> Iterator[List[Any]]:
-        for i in range(0, len(items), size):
-            yield items[i:i + size]
-
+    
     def get_analysis(self, ticker, exchange, screener, interval, timeout=10):
         handler = TA_Handler(
             symbol=ticker,
@@ -335,3 +155,182 @@ class TradingViewClient:
                 f"Error when batch fetching {len(symbols)} symbols "
                 f"for screener={screener}, interval={interval}: {str(exc)}"
             ) from exc
+
+    def chunked(items: List[Any], size: int) -> Iterator[List[Any]]:
+        for i in range(0, len(items), size):
+            yield items[i:i + size]
+
+    def build_symbol_key(exchange: str, ticker: str) -> str:
+        return f"{str(exchange).upper()}:{str(ticker).upper()}"
+    
+    def _extract_symbol(ticker_value: Any) -> Optional[str]:
+        if ticker_value is None:
+            return None
+
+        ticker_str = str(ticker_value).strip()
+        if ":" in ticker_str:
+            return ticker_str.split(":", 1)[1]
+        return ticker_str
+
+    def _clean_value(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+
+        value_str = str(value).strip()
+        if value_str == "" or value_str.lower() == "nan":
+            return None
+
+        return value_str
+
+    def _get_stock_rows(self, seen: set) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        sp500_order = [symbol.upper() for symbol in SP500_SYMBOLS]
+        sp500_set = set(sp500_order)
+        buckets: Dict[str, List[Dict[str, Any]]] = {symbol: [] for symbol in sp500_order}
+
+        for screener in STOCK_SCREENERS:
+            try:
+                query = (
+                    Query()
+                    .select(*STOCK_COLUMNS)
+                    .set_markets(screener)
+                    .limit(5000)
+                )
+
+                _, df = query.get_scanner_data()
+
+            except Exception:
+                logger.exception(
+                    "TradingView screener query failed for screener=%s",
+                    screener,
+                )
+                continue
+
+            if df is None or df.empty:
+                continue
+
+            for _, row in df.iterrows():
+                ticker = self._extract_symbol(row.get("ticker"))
+                exchange = self._clean_value(row.get("exchange"))
+
+                if not ticker or not exchange:
+                    continue
+
+                ticker_upper = ticker.upper()
+                exchange_upper = exchange.upper()
+
+                if ticker_upper not in sp500_set:
+                    continue
+
+                buckets[ticker_upper].append({
+                    "ticker": ticker_upper,
+                    "name": self._clean_value(row.get("name")),
+                    "screener": screener,
+                    "exchange": exchange_upper,
+                    "category": self._clean_value(row.get("type")),
+                    "sector": self._clean_value(row.get("sector")),
+                    "industry": self._clean_value(row.get("industry")),
+                    "image_url": None,
+                })
+
+        for symbol in sp500_order:
+            candidates = buckets.get(symbol, [])
+            if not candidates:
+                logger.warning("No TradingView row found for SP500 symbol=%s", symbol)
+                continue
+
+            # If multiple rows exist for the same ticker, keep the first unseen one.
+            for candidate in candidates:
+                unique_key = (candidate["ticker"], candidate["exchange"], candidate["screener"])
+                if unique_key in seen:
+                    continue
+
+                seen.add(unique_key)
+                rows.append(candidate)
+                break
+
+        return rows
+
+    def _get_crypto_rows(self, seen: set) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        desired_symbols = [symbol.upper() for symbol in TOP_50_CRYPTO_BASES]
+        desired_set = set(desired_symbols)
+        buckets: Dict[str, List[Dict[str, Any]]] = {symbol: [] for symbol in desired_symbols}
+
+        try:
+            query = (
+                Query()
+                .select("name", "exchange")
+                .set_markets("crypto")
+                .limit(5000)
+            )
+
+            _, df = query.get_scanner_data()
+
+            if df is None or df.empty:
+                return rows
+
+            for _, row in df.iterrows():
+                ticker = self._extract_symbol(row.get("ticker"))
+                exchange = self._clean_value(row.get("exchange"))
+                name = self._clean_value(row.get("name"))
+
+                if not ticker or not exchange:
+                    continue
+
+                ticker = ticker.upper()
+                exchange = exchange.upper()
+
+                if not ticker.endswith("USD"):
+                    continue
+
+                base_symbol = ticker[:-3]
+                if base_symbol not in desired_set:
+                    continue
+
+                buckets[base_symbol].append({
+                    "ticker": ticker,
+                    "name": name,
+                    "exchange": exchange,
+                })
+
+            for base_symbol in desired_symbols:
+                candidates = buckets.get(base_symbol, [])
+                if not candidates:
+                    logger.warning(
+                        "No TradingView USD pair found for top-50 crypto symbol=%s",
+                        base_symbol,
+                    )
+                    continue
+
+                candidates.sort(
+                    key=lambda item: (
+                        PREFERRED_CRYPTO_USD_EXCHANGES.index(item["exchange"])
+                        if item["exchange"] in PREFERRED_CRYPTO_USD_EXCHANGES
+                        else 999,
+                        item["exchange"],
+                    )
+                )
+
+                for candidate in candidates:
+                    unique_key = (candidate["ticker"], candidate["exchange"], "crypto")
+                    if unique_key in seen:
+                        continue
+
+                    seen.add(unique_key)
+                    rows.append({
+                        "ticker": candidate["ticker"],
+                        "name": candidate["name"],
+                        "screener": "crypto",
+                        "exchange": candidate["exchange"],
+                        "category": "crypto",
+                        "sector": None,
+                        "industry": None,
+                        "image_url": None,
+                    })
+                    break
+
+            return rows
+
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fetch crypto rows: {str(exc)}") from exc

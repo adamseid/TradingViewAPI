@@ -9,7 +9,6 @@ from api.services.wishlist_services.wishlist_services import WishlistService
 wishlist_service = WishlistService()
 
 
-@csrf_exempt
 @require_POST
 def toggle_wishlist(request):
     if not request.user.is_authenticated:
