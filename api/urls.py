@@ -1,9 +1,13 @@
 from django.urls import path
-from api.views.token_views import (home_page, token_detail, sync_tokens, sync_token_data)
+from api.views.token_views import home_page, token_detail, sync_tokens, sync_token_data
 from api.views.auth_views import register_user, login_user, logout_user, current_user
 from api.views.wishlist_views import toggle_wishlist
+from api.views.security_views import csrf_token
 
 urlpatterns = [
+    # csrf
+    path("auth/csrf/", csrf_token, name="csrf_token"),
+
     # internal / cron / celery
     path("token/sync/", sync_tokens, name="token_sync"),
     path("token/sync-data/", sync_token_data, name="token_data_sync"),
