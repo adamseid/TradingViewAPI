@@ -35,6 +35,12 @@ def sync_token_data(request):
     result = token_service.insert_tokens_data()
     return __service_json_response(result)
 
+@csrf_exempt
+@require_POST
+@require_cron_secret
+def reset_in_use(request):
+    result = token_service.reset_all_stocks_in_use()
+    return __service_json_response(result)
 
 def __service_json_response(result):
     status_code = 200 if result["status"] else 500

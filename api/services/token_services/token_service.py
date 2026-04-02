@@ -359,10 +359,17 @@ class TokenService:
 
                     except Exception as exc:
                         failed_fetched_count += 1
-                        self.repository.disable_stock(stock)
-                        print(
-                            f"[BAD SYMBOL] {symbol_key} disabled after single-symbol fallback failure: {str(exc)}"
-                        )
+                        error_message = str(exc)
+
+                        if is_retryable_error(error_message):
+                            print(
+                                f"[RATE LIMITED] {symbol_key} single-symbol fallback failed but stock was NOT disabled: {error_message}"
+                            )
+                        else:
+                            self.repository.disable_stock(stock)
+                            print(
+                                f"[BAD SYMBOL] {symbol_key} disabled after single-symbol fallback failure: {error_message}"
+                            )
 
                     if index < len(stock_batch):
                         time.sleep(delay_between_single_symbol_requests_seconds)
@@ -567,6 +574,22 @@ class TokenService:
                 "wishlist": wishlist
             },
         )
+    
+    def reset_all_stocks_in_use(self):
+        try:
+            updated_count = self.repository.reset_all_stocks_in_use()
+
+            return self.__service_response(
+                status=True,
+                message=f"Reset in_use=True for {updated_count} stocks.",
+                data={"updated_count": updated_count},
+            )
+        except Exception as exc:
+            return self.__service_response(
+                status=False,
+                message=f"Failed to reset stocks in_use flag: {str(exc)}",
+                data=None,
+            )
     
     def stock_detail(self, ticker):
         stock_rows = self.repository.list_stock_data_by_ticker(ticker)

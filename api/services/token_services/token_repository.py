@@ -211,3 +211,6 @@ class TokenRepository:
         stock.in_use = False
         stock.save(update_fields=["in_use"])
         return stock
+    
+    def reset_all_stocks_in_use(self):
+        return Stock.objects.update(in_use=True)
