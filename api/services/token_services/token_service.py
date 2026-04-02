@@ -162,7 +162,7 @@ class TokenService:
                 message=f"Failed to insert tokens: {str(exc)}",
                 data=None,
             )
-
+        
     def insert_tokens_data(self):
         try:
             stocks = list(self.repository.list_stocks())
@@ -182,10 +182,11 @@ class TokenService:
             failed_fetched_count = 0
             timeout = None
 
-            batch_size = 50
-            delay_between_batch_requests_seconds = 30
+            batch_size = self.client.analysis_batch_size
+            delay_between_interval_requests_seconds = 2
+            delay_between_batch_requests_seconds = 3
             max_retries = 3
-            retry_delay_seconds = 60
+            retry_delay_seconds = 15
 
             def get_batch_analysis_with_retry(stock_batch, interval):
                 delay = retry_delay_seconds
@@ -235,7 +236,8 @@ class TokenService:
                             Interval.INTERVAL_1_DAY,
                         )
 
-                        time.sleep(delay_between_batch_requests_seconds)
+                        if delay_between_interval_requests_seconds > 0:
+                            time.sleep(delay_between_interval_requests_seconds)
 
                         weekly_batch_analysis = get_batch_analysis_with_retry(
                             stock_batch,
