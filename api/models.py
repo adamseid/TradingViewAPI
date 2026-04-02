@@ -10,6 +10,8 @@ class Stock(models.Model):
     sector = models.CharField(max_length=200, null=True)
     industry = models.CharField(max_length=200, null=True)
     image_url = models.CharField(max_length=500, blank=True, null=True)
+    in_use = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

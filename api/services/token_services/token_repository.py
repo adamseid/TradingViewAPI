@@ -1,5 +1,6 @@
 from api.models import Stock, StockData, Wishlist
 from django.db.models import OuterRef, Subquery, Exists, IntegerField, Case, When, Value
+from django.utils import timezone
 import logging
 
 logger = logging.getLogger(__name__)
@@ -146,7 +147,10 @@ class TokenRepository:
         latest_stock_data_subquery = self.get_latest_stock_data_subquery()
 
         queryset = (
-            StockData.objects.filter(id=Subquery(latest_stock_data_subquery))
+            StockData.objects.filter(
+                id=Subquery(latest_stock_data_subquery),
+                stock__in_use=True,
+            )
             .select_related("stock")
             .order_by("stock__ticker", "stock__exchange", "stock__screener")
         )
@@ -176,3 +180,34 @@ class TokenRepository:
             setattr(stock_data, field, value)
         stock_data.save()
         return stock_data
+    
+    def list_stocks_for_sync(self, max_batches=10, batch_size=10):
+        limit = max_batches * batch_size
+
+        return (
+            Stock.objects.filter(in_use=True)
+            .annotate(
+                updated_at_isnull=Case(
+                    When(updated_at__isnull=True, then=Value(0)),
+                    default=Value(1),
+                    output_field=IntegerField(),
+                )
+            )
+            .order_by(
+                "updated_at_isnull",
+                "updated_at",
+                "ticker",
+                "exchange",
+                "screener",
+            )[:limit]
+        )
+
+    def touch_stock_updated_at(self, stock, updated_at=None):
+        stock.updated_at = updated_at or timezone.now()
+        stock.save(update_fields=["updated_at"])
+        return stock
+
+    def disable_stock(self, stock):
+        stock.in_use = False
+        stock.save(update_fields=["in_use"])
+        return stock

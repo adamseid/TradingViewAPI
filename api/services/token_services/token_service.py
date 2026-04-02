@@ -165,14 +165,23 @@ class TokenService:
         
     def insert_tokens_data(self):
         try:
-            stocks = list(self.repository.list_stocks())
+            max_batches_per_run = 10
+            batch_size = self.client.analysis_batch_size
+
+            stocks = list(
+                self.repository.list_stocks_for_sync(
+                    max_batches=max_batches_per_run,
+                    batch_size=batch_size,
+                )
+            )
 
             if not stocks:
                 return self.__service_response(
-                    status=False,
-                    message="No stocks found. Run insert_tokens first.",
+                    status=True,
+                    message="No active stocks are due for sync.",
                     data={
-                        "total_stocks": 0,
+                        "total_stocks_selected": 0,
+                        "processed_batches": 0,
                         "successfully_fetched_count": 0,
                         "failed_fetched_count": 0,
                     },
@@ -180,9 +189,9 @@ class TokenService:
 
             successfully_fetched_count = 0
             failed_fetched_count = 0
+            processed_batches = 0
             timeout = None
 
-            batch_size = self.client.analysis_batch_size
             delay_between_interval_requests_seconds = 30
             delay_between_batch_requests_seconds = 15
             delay_between_single_symbol_requests_seconds = 30
@@ -221,6 +230,7 @@ class TokenService:
                     except Exception as exc:
                         error_message = str(exc)
 
+                        # keep the retry structure in place; with max_batch_retries=1 this is effectively off
                         if is_retryable_error(error_message) and attempt < max_batch_retries - 1:
                             print(
                                 f"[BATCH RETRY] screener={stock_batch[0].screener} "
@@ -235,8 +245,8 @@ class TokenService:
                         raise
 
             def get_single_analysis_with_retry(stock, interval):
-                # delay = retry_delay_seconds
                 symbol_key = symbol_key_for(stock)
+                delay = retry_delay_seconds
 
                 for attempt in range(max_single_retries):
                     try:
@@ -249,22 +259,23 @@ class TokenService:
                         )
                     except Exception as exc:
                         error_message = str(exc)
+
+                        # keep the retry structure in place; with max_single_retries=1 this is effectively off
+                        if is_retryable_error(error_message) and attempt < max_single_retries - 1:
+                            print(
+                                f"[SINGLE RETRY] symbol={symbol_key} "
+                                f"interval={interval} "
+                                f"attempt={attempt + 1}/{max_single_retries} "
+                                f"sleeping={delay}s error={error_message}"
+                            )
+                            time.sleep(delay)
+                            delay *= 2
+                            continue
+
                         print(
                             f"[BAD SYMBOL] {symbol_key} failed single fetch "
                             f"interval={interval} error={error_message}"
                         )
-
-                        # if is_retryable_error(error_message) and attempt < max_single_retries - 1:
-                        #     print(
-                        #         f"[SINGLE RETRY] symbol={symbol_key} "
-                        #         f"interval={interval} "
-                        #         f"attempt={attempt + 1}/{max_single_retries} "
-                        #         f"sleeping={delay}s error={error_message}"
-                        #     )
-                        #     time.sleep(delay)
-                        #     delay *= 2
-                        #     continue
-
                         raise
 
             def create_stock_data_from_analysis(stock, daily_stock_analysis, weekly_stock_analysis, current_date):
@@ -299,10 +310,11 @@ class TokenService:
                     success = self.repository.create_stock_data(payload)
 
                     if success:
+                        self.repository.touch_stock_updated_at(stock, current_date)
                         successfully_fetched_count += 1
                     else:
                         failed_fetched_count += 1
-                        print(f"[BAD SYMBOL] {symbol_key} failed repository.create_stock_data(...)")
+                        print(f"[BAD SYMBOL] {symbol_key} failed repository.create_stock_data(.)")
 
                 except Exception as exc:
                     failed_fetched_count += 1
@@ -347,8 +359,9 @@ class TokenService:
 
                     except Exception as exc:
                         failed_fetched_count += 1
+                        self.repository.disable_stock(stock)
                         print(
-                            f"[BAD SYMBOL] {symbol_key} failed single-symbol fallback: {str(exc)}"
+                            f"[BAD SYMBOL] {symbol_key} disabled after single-symbol fallback failure: {str(exc)}"
                         )
 
                     if index < len(stock_batch):
@@ -359,10 +372,17 @@ class TokenService:
                 screener = str(stock.screener).lower()
                 stocks_by_screener.setdefault(screener, []).append(stock)
 
+            stop_processing = False
+
             for screener, screener_stocks in stocks_by_screener.items():
                 screener_batches = list(self.client.chunked(screener_stocks, batch_size))
 
                 for batch_index, stock_batch in enumerate(screener_batches, start=1):
+                    if processed_batches >= max_batches_per_run:
+                        stop_processing = True
+                        break
+
+                    processed_batches += 1
                     current_date = timezone.now()
 
                     try:
@@ -371,6 +391,7 @@ class TokenService:
                         print(
                             f"Processing screener={screener} "
                             f"batch {batch_index}/{len(screener_batches)} "
+                            f"(run batch {processed_batches}/{max_batches_per_run}) "
                             f"with {len(stock_batch)} symbols: {batch_symbols}"
                         )
 
@@ -420,20 +441,25 @@ class TokenService:
                             original_batch_error=str(exc),
                         )
 
-                    if batch_index < len(screener_batches):
+                    if processed_batches < max_batches_per_run:
                         time.sleep(delay_between_batch_requests_seconds)
 
-            total_stocks = len(stocks)
+                if stop_processing:
+                    break
 
             return self.__service_response(
                 status=True,
                 message=(
                     f"Token data insertion completed. "
+                    f"Selected: {len(stocks)}, "
+                    f"Processed batches: {processed_batches}/{max_batches_per_run}, "
                     f"Successful: {successfully_fetched_count}, "
                     f"Failed: {failed_fetched_count}"
                 ),
                 data={
-                    "total_stocks": total_stocks,
+                    "total_stocks_selected": len(stocks),
+                    "processed_batches": processed_batches,
+                    "max_batches_per_run": max_batches_per_run,
                     "successfully_fetched_count": successfully_fetched_count,
                     "failed_fetched_count": failed_fetched_count,
                 },
