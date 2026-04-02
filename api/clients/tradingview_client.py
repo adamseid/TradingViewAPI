@@ -156,13 +156,16 @@ class TradingViewClient:
                 f"for screener={screener}, interval={interval}: {str(exc)}"
             ) from exc
 
+    @staticmethod
     def chunked(items: List[Any], size: int) -> Iterator[List[Any]]:
         for i in range(0, len(items), size):
             yield items[i:i + size]
 
+    @staticmethod
     def build_symbol_key(exchange: str, ticker: str) -> str:
         return f"{str(exchange).upper()}:{str(ticker).upper()}"
     
+    @staticmethod
     def _extract_symbol(ticker_value: Any) -> Optional[str]:
         if ticker_value is None:
             return None
@@ -172,6 +175,7 @@ class TradingViewClient:
             return ticker_str.split(":", 1)[1]
         return ticker_str
 
+    @staticmethod
     def _clean_value(value: Any) -> Optional[str]:
         if value is None:
             return None
