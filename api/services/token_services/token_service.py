@@ -183,13 +183,13 @@ class TokenService:
             timeout = None
 
             batch_size = self.client.analysis_batch_size
-            delay_between_interval_requests_seconds = 2
-            delay_between_batch_requests_seconds = 5
-            delay_between_single_symbol_requests_seconds = 4
+            delay_between_interval_requests_seconds = 30
+            delay_between_batch_requests_seconds = 15
+            delay_between_single_symbol_requests_seconds = 30
 
-            max_batch_retries = 3
-            max_single_retries = 3
-            retry_delay_seconds = 15
+            max_batch_retries = 1
+            max_single_retries = 1
+            retry_delay_seconds = 30
 
             def symbol_key_for(stock):
                 return self.client.build_symbol_key(stock.exchange, stock.ticker)
@@ -235,7 +235,7 @@ class TokenService:
                         raise
 
             def get_single_analysis_with_retry(stock, interval):
-                delay = retry_delay_seconds
+                # delay = retry_delay_seconds
                 symbol_key = symbol_key_for(stock)
 
                 for attempt in range(max_single_retries):
@@ -249,17 +249,21 @@ class TokenService:
                         )
                     except Exception as exc:
                         error_message = str(exc)
+                        print(
+                            f"[BAD SYMBOL] {symbol_key} failed single fetch "
+                            f"interval={interval} error={error_message}"
+                        )
 
-                        if is_retryable_error(error_message) and attempt < max_single_retries - 1:
-                            print(
-                                f"[SINGLE RETRY] symbol={symbol_key} "
-                                f"interval={interval} "
-                                f"attempt={attempt + 1}/{max_single_retries} "
-                                f"sleeping={delay}s error={error_message}"
-                            )
-                            time.sleep(delay)
-                            delay *= 2
-                            continue
+                        # if is_retryable_error(error_message) and attempt < max_single_retries - 1:
+                        #     print(
+                        #         f"[SINGLE RETRY] symbol={symbol_key} "
+                        #         f"interval={interval} "
+                        #         f"attempt={attempt + 1}/{max_single_retries} "
+                        #         f"sleeping={delay}s error={error_message}"
+                        #     )
+                        #     time.sleep(delay)
+                        #     delay *= 2
+                        #     continue
 
                         raise
 
@@ -305,6 +309,8 @@ class TokenService:
                     print(f"[BAD SYMBOL] {symbol_key} failed to create StockData: {str(exc)}")
 
             def fallback_batch_to_single(stock_batch, current_date, original_batch_error):
+                nonlocal failed_fetched_count
+
                 print(
                     f"[FALLBACK] switching failed batch to single-symbol mode. "
                     f"screener={stock_batch[0].screener} size={len(stock_batch)} "
