@@ -184,14 +184,34 @@ class TokenService:
 
             batch_size = self.client.analysis_batch_size
             delay_between_interval_requests_seconds = 2
-            delay_between_batch_requests_seconds = 3
-            max_retries = 3
+            delay_between_batch_requests_seconds = 5
+            delay_between_single_symbol_requests_seconds = 4
+
+            max_batch_retries = 3
+            max_single_retries = 3
             retry_delay_seconds = 15
+
+            def symbol_key_for(stock):
+                return self.client.build_symbol_key(stock.exchange, stock.ticker)
+
+            def is_retryable_error(error_message: str) -> bool:
+                message = (error_message or "").lower()
+                retry_markers = [
+                    "429",
+                    "rate limit",
+                    "too many requests",
+                    "timeout",
+                    "timed out",
+                    "connection reset",
+                    "temporarily unavailable",
+                    "expecting value: line 1 column 1 (char 0)",
+                ]
+                return any(marker in message for marker in retry_markers)
 
             def get_batch_analysis_with_retry(stock_batch, interval):
                 delay = retry_delay_seconds
 
-                for attempt in range(max_retries):
+                for attempt in range(max_batch_retries):
                     try:
                         return self.client.get_analysis_batch(
                             stock_batch,
@@ -201,17 +221,132 @@ class TokenService:
                     except Exception as exc:
                         error_message = str(exc)
 
-                        if "429" in error_message and attempt < max_retries - 1:
+                        if is_retryable_error(error_message) and attempt < max_batch_retries - 1:
                             print(
-                                f"Rate limited for batch "
-                                f"({stock_batch[0].screener}, {interval}, size={len(stock_batch)}). "
-                                f"Retry {attempt + 1}/{max_retries} after {delay}s"
+                                f"[BATCH RETRY] screener={stock_batch[0].screener} "
+                                f"interval={interval} size={len(stock_batch)} "
+                                f"attempt={attempt + 1}/{max_batch_retries} "
+                                f"sleeping={delay}s error={error_message}"
                             )
                             time.sleep(delay)
                             delay *= 2
                             continue
 
                         raise
+
+            def get_single_analysis_with_retry(stock, interval):
+                delay = retry_delay_seconds
+                symbol_key = symbol_key_for(stock)
+
+                for attempt in range(max_single_retries):
+                    try:
+                        return self.client.get_analysis(
+                            ticker=stock.ticker,
+                            exchange=stock.exchange,
+                            screener=stock.screener,
+                            interval=interval,
+                            timeout=timeout,
+                        )
+                    except Exception as exc:
+                        error_message = str(exc)
+
+                        if is_retryable_error(error_message) and attempt < max_single_retries - 1:
+                            print(
+                                f"[SINGLE RETRY] symbol={symbol_key} "
+                                f"interval={interval} "
+                                f"attempt={attempt + 1}/{max_single_retries} "
+                                f"sleeping={delay}s error={error_message}"
+                            )
+                            time.sleep(delay)
+                            delay *= 2
+                            continue
+
+                        raise
+
+            def create_stock_data_from_analysis(stock, daily_stock_analysis, weekly_stock_analysis, current_date):
+                nonlocal successfully_fetched_count, failed_fetched_count
+
+                symbol_key = symbol_key_for(stock)
+
+                try:
+                    prev_stock_data = self.repository.get_latest_stock_data(stock)
+
+                    support = daily_stock_analysis.indicators.get("Pivot.M.Classic.S1")
+                    resistance = daily_stock_analysis.indicators.get("Pivot.M.Classic.R1")
+
+                    if support is None or resistance is None:
+                        failed_fetched_count += 1
+                        print(
+                            f"[BAD SYMBOL] {symbol_key} missing pivot indicators. "
+                            f"support={support}, resistance={resistance}"
+                        )
+                        return
+
+                    payload = self.__build_stock_data_payload(
+                        daily_stock_analysis=daily_stock_analysis,
+                        weekly_stock_analysis=weekly_stock_analysis,
+                        current_date=current_date,
+                        support=support,
+                        resistance=resistance,
+                        stock=stock,
+                        prev_stock_data=prev_stock_data,
+                    )
+
+                    success = self.repository.create_stock_data(payload)
+
+                    if success:
+                        successfully_fetched_count += 1
+                    else:
+                        failed_fetched_count += 1
+                        print(f"[BAD SYMBOL] {symbol_key} failed repository.create_stock_data(...)")
+
+                except Exception as exc:
+                    failed_fetched_count += 1
+                    print(f"[BAD SYMBOL] {symbol_key} failed to create StockData: {str(exc)}")
+
+            def fallback_batch_to_single(stock_batch, current_date, original_batch_error):
+                print(
+                    f"[FALLBACK] switching failed batch to single-symbol mode. "
+                    f"screener={stock_batch[0].screener} size={len(stock_batch)} "
+                    f"error={original_batch_error}"
+                )
+
+                for index, stock in enumerate(stock_batch, start=1):
+                    symbol_key = symbol_key_for(stock)
+
+                    try:
+                        print(
+                            f"[FALLBACK] processing symbol {index}/{len(stock_batch)} "
+                            f"{symbol_key}"
+                        )
+
+                        daily_stock_analysis = get_single_analysis_with_retry(
+                            stock,
+                            Interval.INTERVAL_1_DAY,
+                        )
+
+                        time.sleep(delay_between_interval_requests_seconds)
+
+                        weekly_stock_analysis = get_single_analysis_with_retry(
+                            stock,
+                            Interval.INTERVAL_1_WEEK,
+                        )
+
+                        create_stock_data_from_analysis(
+                            stock=stock,
+                            daily_stock_analysis=daily_stock_analysis,
+                            weekly_stock_analysis=weekly_stock_analysis,
+                            current_date=current_date,
+                        )
+
+                    except Exception as exc:
+                        failed_fetched_count += 1
+                        print(
+                            f"[BAD SYMBOL] {symbol_key} failed single-symbol fallback: {str(exc)}"
+                        )
+
+                    if index < len(stock_batch):
+                        time.sleep(delay_between_single_symbol_requests_seconds)
 
             stocks_by_screener = {}
             for stock in stocks:
@@ -222,14 +357,16 @@ class TokenService:
                 screener_batches = list(self.client.chunked(screener_stocks, batch_size))
 
                 for batch_index, stock_batch in enumerate(screener_batches, start=1):
+                    current_date = timezone.now()
+
                     try:
+                        batch_symbols = [symbol_key_for(stock) for stock in stock_batch]
+
                         print(
                             f"Processing screener={screener} "
                             f"batch {batch_index}/{len(screener_batches)} "
-                            f"with {len(stock_batch)} symbols"
+                            f"with {len(stock_batch)} symbols: {batch_symbols}"
                         )
-
-                        current_date = timezone.now()
 
                         daily_batch_analysis = get_batch_analysis_with_retry(
                             stock_batch,
@@ -245,63 +382,36 @@ class TokenService:
                         )
 
                         for stock in stock_batch:
-                            try:
-                                symbol_key = self.client.build_symbol_key(
-                                    stock.exchange,
-                                    stock.ticker,
-                                )
+                            symbol_key = symbol_key_for(stock)
 
-                                daily_stock_analysis = daily_batch_analysis.get(symbol_key)
-                                weekly_stock_analysis = weekly_batch_analysis.get(symbol_key)
+                            daily_stock_analysis = daily_batch_analysis.get(symbol_key)
+                            weekly_stock_analysis = weekly_batch_analysis.get(symbol_key)
 
-                                if daily_stock_analysis is None or weekly_stock_analysis is None:
-                                    failed_fetched_count += 1
-                                    print(
-                                        f"Missing analysis for {symbol_key}. "
-                                        f"daily_found={daily_stock_analysis is not None}, "
-                                        f"weekly_found={weekly_stock_analysis is not None}"
-                                    )
-                                    continue
-
-                                prev_stock_data = self.repository.get_latest_stock_data(stock)
-
-                                support = daily_stock_analysis.indicators.get("Pivot.M.Classic.S1")
-                                resistance = daily_stock_analysis.indicators.get("Pivot.M.Classic.R1")
-
-                                if support is None or resistance is None:
-                                    failed_fetched_count += 1
-                                    print(
-                                        f"Missing pivot indicators for {symbol_key}. "
-                                        f"support={support}, resistance={resistance}"
-                                    )
-                                    continue
-
-                                payload = self.__build_stock_data_payload(
-                                    daily_stock_analysis=daily_stock_analysis,
-                                    weekly_stock_analysis=weekly_stock_analysis,
-                                    current_date=current_date,
-                                    support=support,
-                                    resistance=resistance,
-                                    stock=stock,
-                                    prev_stock_data=prev_stock_data,
-                                )
-
-                                success = self.repository.create_stock_data(payload)
-
-                                if success:
-                                    successfully_fetched_count += 1
-                                else:
-                                    failed_fetched_count += 1
-
-                            except Exception as exc:
+                            if daily_stock_analysis is None or weekly_stock_analysis is None:
                                 failed_fetched_count += 1
-                                print(f"Failed to create StockData for {stock.ticker}: {str(exc)}")
+                                print(
+                                    f"[BAD SYMBOL] {symbol_key} missing analysis from successful batch. "
+                                    f"daily_found={daily_stock_analysis is not None}, "
+                                    f"weekly_found={weekly_stock_analysis is not None}"
+                                )
+                                continue
+
+                            create_stock_data_from_analysis(
+                                stock=stock,
+                                daily_stock_analysis=daily_stock_analysis,
+                                weekly_stock_analysis=weekly_stock_analysis,
+                                current_date=current_date,
+                            )
 
                     except Exception as exc:
-                        failed_fetched_count += len(stock_batch)
                         print(
                             f"Failed batch for screener={screener}, "
                             f"batch={batch_index}, size={len(stock_batch)}: {str(exc)}"
+                        )
+                        fallback_batch_to_single(
+                            stock_batch=stock_batch,
+                            current_date=current_date,
+                            original_batch_error=str(exc),
                         )
 
                     if batch_index < len(screener_batches):

@@ -93,7 +93,7 @@ class TradingViewClient:
         self,
         default_batch_size: int = 500,
         default_timeout: int = 10,
-        analysis_batch_size: int = 20,
+        analysis_batch_size: int = 10,
         proxies: Optional[Dict[str, str]] = None,
     ):
         self.default_batch_size = default_batch_size
