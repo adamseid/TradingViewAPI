@@ -208,9 +208,19 @@ class TokenRepository:
         return stock
 
     def disable_stock(self, stock):
+        if not stock.in_use:
+            return False
+
         stock.in_use = False
         stock.save(update_fields=["in_use"])
-        return stock
+        logger.warning(
+            "Stock disabled for sync. stock_id=%s symbol=%s:%s screener=%s",
+            stock.id,
+            stock.exchange,
+            stock.ticker,
+            stock.screener,
+        )
+        return True
     
     def reset_all_stocks_in_use(self):
         return Stock.objects.update(in_use=True)

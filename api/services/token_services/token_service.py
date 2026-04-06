@@ -1,9 +1,12 @@
 from django.utils import timezone
 from tradingview_ta import Interval
 import time
+import logging
 from api.clients.tradingview_client import TradingViewClient
 from api.services.token_services.token_repository import TokenRepository
 from api.services.token_services.token_score_calculator import TokenScoreCalculator
+
+logger = logging.getLogger(__name__)
 
 
 class TokenService:
@@ -166,6 +169,15 @@ class TokenService:
     def __symbol_key_for(self, stock):
         return self.client.build_symbol_key(stock.exchange, stock.ticker)
 
+    def __is_rate_limit_error(self, error_message: str) -> bool:
+        message = (error_message or "").lower()
+        rate_limit_markers = [
+            "429",
+            "rate limit",
+            "too many requests",
+        ]
+        return any(marker in message for marker in rate_limit_markers)
+
     def __is_retryable_error(self, error_message: str) -> bool:
         message = (error_message or "").lower()
         retry_markers = [
@@ -179,6 +191,40 @@ class TokenService:
             "expecting value: line 1 column 1 (char 0)",
         ]
         return any(marker in message for marker in retry_markers)
+
+    def __disable_stock_for_sync_failure(self, stock, reason, log_prefix="[BAD SYMBOL]"):
+        symbol_key = self.__symbol_key_for(stock)
+        changed = self.repository.disable_stock(stock)
+
+        if changed:
+            print(f"{log_prefix} {symbol_key} in_use set to False. reason={reason}")
+        else:
+            print(f"{log_prefix} {symbol_key} already disabled. reason={reason}")
+
+    def __get_missing_required_indicators(self, daily_stock_analysis, weekly_stock_analysis):
+        required_daily_indicators = {
+            "Pivot.M.Classic.S1": daily_stock_analysis.indicators.get("Pivot.M.Classic.S1"),
+            "Pivot.M.Classic.R1": daily_stock_analysis.indicators.get("Pivot.M.Classic.R1"),
+            "MACD.macd": daily_stock_analysis.indicators.get("MACD.macd"),
+            "MACD.signal": daily_stock_analysis.indicators.get("MACD.signal"),
+        }
+        required_weekly_indicators = {
+            "MACD.macd": weekly_stock_analysis.indicators.get("MACD.macd"),
+            "MACD.signal": weekly_stock_analysis.indicators.get("MACD.signal"),
+        }
+
+        missing_daily = [
+            indicator_key
+            for indicator_key, value in required_daily_indicators.items()
+            if value is None
+        ]
+        missing_weekly = [
+            indicator_key
+            for indicator_key, value in required_weekly_indicators.items()
+            if value is None
+        ]
+
+        return missing_daily, missing_weekly
 
     def __get_batch_analysis_with_retry(
         self,
@@ -259,28 +305,36 @@ class TokenService:
         daily_stock_analysis,
         weekly_stock_analysis,
         current_date,
+        disable_on_failure=False,
     ):
         symbol_key = self.__symbol_key_for(stock)
 
         try:
             prev_stock_data = self.repository.get_latest_stock_data(stock)
 
-            support = daily_stock_analysis.indicators.get("Pivot.M.Classic.S1")
-            resistance = daily_stock_analysis.indicators.get("Pivot.M.Classic.R1")
+            missing_daily, missing_weekly = self.__get_missing_required_indicators(
+                daily_stock_analysis=daily_stock_analysis,
+                weekly_stock_analysis=weekly_stock_analysis,
+            )
 
-            if support is None or resistance is None:
-                print(
-                    f"[BAD SYMBOL] {symbol_key} missing pivot indicators. "
-                    f"support={support}, resistance={resistance}"
+            if missing_daily or missing_weekly:
+                reason = (
+                    f"missing indicators daily={missing_daily or '[]'} "
+                    f"weekly={missing_weekly or '[]'}"
                 )
+                print(
+                    f"[BAD SYMBOL] {symbol_key} missing required indicators. {reason}"
+                )
+                if disable_on_failure:
+                    self.__disable_stock_for_sync_failure(stock, reason)
                 return False, 1
 
             payload = self.__build_stock_data_payload(
                 daily_stock_analysis=daily_stock_analysis,
                 weekly_stock_analysis=weekly_stock_analysis,
                 current_date=current_date,
-                support=support,
-                resistance=resistance,
+                support=daily_stock_analysis.indicators.get("Pivot.M.Classic.S1"),
+                resistance=daily_stock_analysis.indicators.get("Pivot.M.Classic.R1"),
                 stock=stock,
                 prev_stock_data=prev_stock_data,
             )
@@ -292,10 +346,17 @@ class TokenService:
                 return True, 0
 
             print(f"[BAD SYMBOL] {symbol_key} failed repository.create_stock_data(.)")
+            if disable_on_failure:
+                self.__disable_stock_for_sync_failure(
+                    stock,
+                    "repository.create_stock_data returned False",
+                )
             return False, 1
 
         except Exception as exc:
             print(f"[BAD SYMBOL] {symbol_key} failed to create StockData: {str(exc)}")
+            if disable_on_failure:
+                self.__disable_stock_for_sync_failure(stock, str(exc))
             return False, 1
 
     def __process_successful_batch(
@@ -316,11 +377,15 @@ class TokenService:
 
             if daily_stock_analysis is None or weekly_stock_analysis is None:
                 failed_count += 1
-                print(
-                    f"[BAD SYMBOL] {symbol_key} missing analysis from successful batch. "
+                reason = (
+                    "missing analysis from successful batch. "
                     f"daily_found={daily_stock_analysis is not None}, "
                     f"weekly_found={weekly_stock_analysis is not None}"
                 )
+                print(
+                    f"[BAD SYMBOL] {symbol_key} {reason}"
+                )
+                self.__disable_stock_for_sync_failure(stock, reason)
                 continue
 
             created, failed_increment = self.__create_stock_data_from_analysis(
@@ -328,6 +393,7 @@ class TokenService:
                 daily_stock_analysis=daily_stock_analysis,
                 weekly_stock_analysis=weekly_stock_analysis,
                 current_date=current_date,
+                disable_on_failure=True,
             )
 
             if created:
@@ -400,18 +466,17 @@ class TokenService:
                 failed_count += 1
                 error_message = str(exc)
 
-                if self.__is_retryable_error(error_message):
+                if self.__is_rate_limit_error(error_message):
                     print(
-                        f"[RATE LIMITED] {symbol_key} single-symbol fallback hit a retryable error. "
-                        f"Skipping the rest of this batch and moving to the next batch. "
+                        f"[RATE LIMITED] {symbol_key} single-symbol fallback hit a rate-limit error. "
+                        f"Stopping all remaining sync work for this run. "
                         f"error={error_message}"
                     )
                     return success_count, failed_count, True
 
-                self.repository.disable_stock(stock)
-                print(
-                    f"[BAD SYMBOL] {symbol_key} disabled after single-symbol fallback failure: "
-                    f"{error_message}"
+                self.__disable_stock_for_sync_failure(
+                    stock,
+                    f"single-symbol fallback failure: {error_message}",
                 )
 
             if index < len(stock_batch):
@@ -521,11 +586,15 @@ class TokenService:
                             f"batch={batch_index}, size={len(stock_batch)}: {error_message}"
                         )
 
-                        if self.__is_retryable_error(error_message):
+                        if self.__is_rate_limit_error(error_message):
+                            print(
+                                f"[RATE LIMITED] Batch sync halted for screener={screener}, "
+                                f"batch={batch_index}, error={error_message}"
+                            )
                             return self.__service_response(
                                 status=False,
                                 message=(
-                                    f"Token data insertion aborted due to rate limit / retryable error. "
+                                    f"Token data insertion aborted due to rate limit. "
                                     f"Processed batches: {processed_batches}/{max_batches_per_run}. "
                                     f"Successful: {successfully_fetched_count}, "
                                     f"Failed: {failed_fetched_count}. "
@@ -801,14 +870,13 @@ class TokenService:
             current_price,
         )
 
-        daily_macd_histogram = (
-            daily_stock_analysis.indicators["MACD.macd"]
-            - daily_stock_analysis.indicators["MACD.signal"]
-        )
-        weekly_macd_histogram = (
-            weekly_stock_analysis.indicators["MACD.macd"]
-            - weekly_stock_analysis.indicators["MACD.signal"]
-        )
+        daily_macd_line = daily_stock_analysis.indicators.get("MACD.macd")
+        daily_macd_signal = daily_stock_analysis.indicators.get("MACD.signal")
+        weekly_macd_line = weekly_stock_analysis.indicators.get("MACD.macd")
+        weekly_macd_signal = weekly_stock_analysis.indicators.get("MACD.signal")
+
+        daily_macd_histogram = daily_macd_line - daily_macd_signal
+        weekly_macd_histogram = weekly_macd_line - weekly_macd_signal
 
         daily_macd_velocity = None
         weekly_macd_velocity = None
@@ -835,33 +903,23 @@ class TokenService:
                 weekly_macd_velocity,
             )
 
-            total_score = (
-                support_resistance_score
-                + ma_50d_score
-                + ma_100d_score
-                + ma_200d_score
-                + daily_macd_score
-                + weekly_macd_score
+            total_score = self.calculator.calculate_total_score(
+                support_resistance_score=support_resistance_score,
+                ma_50d_score=ma_50d_score,
+                ma_100d_score=ma_100d_score,
+                ma_200d_score=ma_200d_score,
+                daily_macd_score=daily_macd_score,
+                weekly_macd_score=weekly_macd_score,
             )
-
-            if total_score > 4:
-                direction = 2
-            elif total_score > 2:
-                direction = 1
-            elif total_score < -4:
-                direction = -2
-            elif total_score < -2:
-                direction = -1
-            else:
-                direction = 0
+            direction = self.calculator.calculate_direction(total_score)
 
         payload = {
             "date": current_date,
-            "daily_macd_line": daily_stock_analysis.indicators["MACD.macd"],
-            "daily_macd_signal": daily_stock_analysis.indicators["MACD.signal"],
+            "daily_macd_line": daily_macd_line,
+            "daily_macd_signal": daily_macd_signal,
             "daily_macd_histogram": daily_macd_histogram,
-            "weekly_macd_line": weekly_stock_analysis.indicators["MACD.macd"],
-            "weekly_macd_signal": weekly_stock_analysis.indicators["MACD.signal"],
+            "weekly_macd_line": weekly_macd_line,
+            "weekly_macd_signal": weekly_macd_signal,
             "weekly_macd_histogram": weekly_macd_histogram,
             "support": support,
             "resistance": resistance,
