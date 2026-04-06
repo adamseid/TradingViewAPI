@@ -159,3 +159,16 @@ class Wishlist(models.Model):
 
     def __str__(self):
         return f"{self.user_id} - {self.stock_id}"
+
+
+class SyncJobLock(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    is_running = models.BooleanField(default=False)
+    started_at = models.DateTimeField(blank=True, null=True)
+    last_finished_at = models.DateTimeField(blank=True, null=True)
+    last_status = models.BooleanField(blank=True, null=True)
+    last_message = models.TextField(blank=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.name} ({'running' if self.is_running else 'idle'})"

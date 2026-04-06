@@ -1,5 +1,12 @@
 from django.urls import path
-from api.views.token_views import home_page, token_detail, sync_tokens, sync_token_data, reset_in_use
+from api.views.token_views import (
+    home_page,
+    token_detail,
+    sync_tokens,
+    sync_token_data,
+    sync_token_data_status,
+    reset_in_use,
+)
 from api.views.auth_views import register_user, login_user, logout_user, current_user
 from api.views.wishlist_views import toggle_wishlist
 from api.views.security_views import csrf_token
@@ -11,6 +18,7 @@ urlpatterns = [
     # internal / cron / celery
     path("token/sync/", sync_tokens, name="token_sync"),
     path("token/sync-data/", sync_token_data, name="token_data_sync"),
+    path("token/sync-data/status/", sync_token_data_status, name="token_data_sync_status"),
     path("token/reset-in-use/", reset_in_use, name="reset_in_use"),
 
     # frontend
