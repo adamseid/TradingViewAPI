@@ -192,7 +192,7 @@ class TokenService:
             processed_batches = 0
             timeout = None
 
-            delay_between_interval_requests_seconds = 30
+            delay_between_interval_requests_seconds = 45
             delay_between_batch_requests_seconds = 15
             delay_between_single_symbol_requests_seconds = 30
 
@@ -337,6 +337,8 @@ class TokenService:
                             f"[FALLBACK] processing symbol {index}/{len(stock_batch)} "
                             f"{symbol_key}"
                         )
+
+                        time.sleep(delay_between_interval_requests_seconds)
 
                         daily_stock_analysis = get_single_analysis_with_retry(
                             stock,
