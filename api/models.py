@@ -14,6 +14,9 @@ class Stock(models.Model):
     updated_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    class Meta:
+        db_table = "stocks"
+
     def __str__(self):
         return f"{self.ticker} ({self.exchange})"
 
@@ -133,6 +136,9 @@ class StockData(models.Model):
     total_score = models.DecimalField(max_digits=15, decimal_places=6, null=True)
     direction = models.DecimalField(max_digits=15, decimal_places=6, null=True)
 
+    class Meta:
+        db_table = "stock_data"
+
     def __str__(self):
         return f"Data for {self.stock.ticker} on {self.date}"
 
@@ -150,6 +156,7 @@ class Wishlist(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
+        db_table = "wishlists"
         constraints = [
             models.UniqueConstraint(
                 fields=["user", "stock"],
@@ -169,6 +176,9 @@ class SyncJobLock(models.Model):
     last_status = models.BooleanField(blank=True, null=True)
     last_message = models.TextField(blank=True, null=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "sync_job_locks"
 
     def __str__(self):
         return f"{self.name} ({'running' if self.is_running else 'idle'})"

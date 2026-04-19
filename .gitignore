@@ -2,3 +2,8 @@
 *.py[cod]
 __pycache__/
 db.sqlite3
+data.json
+neon-data.json
+neon-fixtures/
+.agents/
+skills-lock.json

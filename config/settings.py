@@ -8,6 +8,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 import os
 import dj_database_url
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
@@ -27,6 +28,7 @@ def env_list(name: str, default: str = "") -> list[str]:
 
 SECRET_KEY = os.getenv("SECRET_KEY", "django-dev-only-change-me")
 DEBUG = env_bool("DEBUG", True)
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 ALLOWED_HOSTS = env_list("ALLOWED_HOSTS", "127.0.0.1,localhost")
 CRON_SECRET = os.getenv("CRON_SECRET", "")
@@ -74,12 +76,26 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "config.wsgi.application"
 
-DATABASES = {
-    "default": dj_database_url.config(
-        default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
+if DATABASE_URL:
+    default_database = dj_database_url.parse(
+        DATABASE_URL,
         conn_max_age=600,
         conn_health_checks=True,
     )
+elif DEBUG:
+    default_database = dj_database_url.parse(
+        f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
+        conn_max_age=600,
+        conn_health_checks=True,
+    )
+else:
+    raise ImproperlyConfigured(
+        "DATABASE_URL must be set when DEBUG=False. "
+        "Use Neon or another persistent Postgres database in Railway."
+    )
+
+DATABASES = {
+    "default": default_database,
 }
 
 AUTH_PASSWORD_VALIDATORS = [
