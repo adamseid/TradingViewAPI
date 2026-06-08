@@ -1,7 +1,10 @@
 from django.utils import timezone
+from django.utils.text import slugify
 from tradingview_ta import Interval
 import time
 import logging
+from datetime import datetime, time as datetime_time, timedelta
+from zoneinfo import ZoneInfo
 from api.clients.tradingview_client import TradingViewClient
 from api.services.token_services.constants import (
     DAILY_FIELD_MAP,
@@ -14,6 +17,10 @@ from api.services.token_services.token_repository import TokenRepository
 from api.services.token_services.token_score_calculator import TokenScoreCalculator
 
 logger = logging.getLogger(__name__)
+MARKET_TIMEZONE = ZoneInfo("America/New_York")
+MARKET_OPEN_TIME = datetime_time(hour=9, minute=30)
+MARKET_CLOSE_TIME = datetime_time(hour=16, minute=0)
+ALLOWED_MANUAL_SCREENERS = {"america", "canada", "crypto"}
 
 
 class TokenService:
@@ -127,6 +134,124 @@ class TokenService:
         ]
 
         return missing_daily, missing_weekly
+
+    def __is_stock_screener(self, stock):
+        return self.repository.normalize_screener(stock.screener) != "crypto"
+
+    def __get_previous_market_day(self, market_date):
+        previous_day = market_date - timedelta(days=1)
+        while previous_day.weekday() >= 5:
+            previous_day -= timedelta(days=1)
+        return previous_day
+
+    def __get_next_market_day(self, market_date):
+        next_day = market_date + timedelta(days=1)
+        while next_day.weekday() >= 5:
+            next_day += timedelta(days=1)
+        return next_day
+
+    def __get_non_trading_window(self, current_date):
+        market_now = timezone.localtime(current_date, MARKET_TIMEZONE)
+        market_date = market_now.date()
+        market_time = market_now.time()
+
+        if market_now.weekday() >= 5:
+            previous_market_day = self.__get_previous_market_day(market_date)
+            next_market_day = self.__get_next_market_day(market_date)
+            window_start = timezone.make_aware(
+                datetime.combine(previous_market_day, MARKET_CLOSE_TIME),
+                MARKET_TIMEZONE,
+            )
+            window_end = timezone.make_aware(
+                datetime.combine(next_market_day, MARKET_OPEN_TIME),
+                MARKET_TIMEZONE,
+            )
+            return window_start, window_end
+
+        if market_time < MARKET_OPEN_TIME:
+            previous_market_day = self.__get_previous_market_day(market_date)
+            window_start = timezone.make_aware(
+                datetime.combine(previous_market_day, MARKET_CLOSE_TIME),
+                MARKET_TIMEZONE,
+            )
+            window_end = timezone.make_aware(
+                datetime.combine(market_date, MARKET_OPEN_TIME),
+                MARKET_TIMEZONE,
+            )
+            return window_start, window_end
+
+        next_market_day = self.__get_next_market_day(market_date)
+        window_start = timezone.make_aware(
+            datetime.combine(market_date, MARKET_CLOSE_TIME),
+            MARKET_TIMEZONE,
+        )
+        window_end = timezone.make_aware(
+            datetime.combine(next_market_day, MARKET_OPEN_TIME),
+            MARKET_TIMEZONE,
+        )
+        return window_start, window_end
+
+    def isTradingHours(self, stock, current_date=None):
+        current_date = current_date or timezone.now()
+
+        if not self.__is_stock_screener(stock):
+            return {
+                "is_trading_hours": True,
+                "should_sync": True,
+                "non_trading_window_start": None,
+                "non_trading_window_end": None,
+            }
+
+        market_now = timezone.localtime(current_date, MARKET_TIMEZONE)
+        is_weekday = market_now.weekday() < 5
+        is_trading_hours = (
+            is_weekday and MARKET_OPEN_TIME <= market_now.time() < MARKET_CLOSE_TIME
+        )
+
+        if is_trading_hours:
+            return {
+                "is_trading_hours": True,
+                "should_sync": True,
+                "non_trading_window_start": None,
+                "non_trading_window_end": None,
+            }
+
+        non_trading_window_start, non_trading_window_end = self.__get_non_trading_window(
+            current_date
+        )
+        already_synced = self.repository.stock_data_exists_in_range(
+            stock=stock,
+            start_date=non_trading_window_start,
+            end_date=non_trading_window_end,
+        )
+
+        return {
+            "is_trading_hours": False,
+            "should_sync": not already_synced,
+            "non_trading_window_start": non_trading_window_start,
+            "non_trading_window_end": non_trading_window_end,
+        }
+
+    def __filter_syncable_stocks(self, stocks, current_date):
+        syncable_stocks = []
+        skipped_non_trading_count = 0
+
+        for stock in stocks:
+            sync_status = self.isTradingHours(stock, current_date=current_date)
+
+            if sync_status["should_sync"]:
+                syncable_stocks.append(stock)
+                continue
+
+            skipped_non_trading_count += 1
+            symbol_key = self.__symbol_key_for(stock)
+            print(
+                f"[SKIP NON-TRADING] {symbol_key} already has data between "
+                f"{sync_status['non_trading_window_start']} and "
+                f"{sync_status['non_trading_window_end']}"
+            )
+
+        return syncable_stocks, skipped_non_trading_count
 
     def __get_batch_analysis_with_retry(
         self,
@@ -414,6 +539,7 @@ class TokenService:
             failed_fetched_count = 0
             processed_batches = 0
             timeout = self.sync_config.timeout
+            skipped_non_trading_count = 0
 
             stocks_by_screener = {}
             for stock in stocks:
@@ -430,21 +556,36 @@ class TokenService:
                         stop_processing = True
                         break
 
-                    processed_batches += 1
                     current_date = timezone.now()
+                    syncable_batch, skipped_count = self.__filter_syncable_stocks(
+                        stock_batch,
+                        current_date=current_date,
+                    )
+                    skipped_non_trading_count += skipped_count
+
+                    if not syncable_batch:
+                        print(
+                            f"Skipping screener={screener} batch {batch_index}/{len(screener_batches)} "
+                            "because all stock symbols already have a non-trading-hours record."
+                        )
+                        continue
+
+                    processed_batches += 1
 
                     try:
-                        batch_symbols = [self.__symbol_key_for(stock) for stock in stock_batch]
+                        batch_symbols = [
+                            self.__symbol_key_for(stock) for stock in syncable_batch
+                        ]
 
                         print(
                             f"Processing screener={screener} "
                             f"batch {batch_index}/{len(screener_batches)} "
                             f"(run batch {processed_batches}/{max_batches_per_run}) "
-                            f"with {len(stock_batch)} symbols: {batch_symbols}"
+                            f"with {len(syncable_batch)} symbols: {batch_symbols}"
                         )
 
                         daily_batch_analysis = self.__get_batch_analysis_with_retry(
-                            stock_batch=stock_batch,
+                            stock_batch=syncable_batch,
                             interval=Interval.INTERVAL_1_DAY,
                             timeout=timeout,
                             max_batch_retries=self.sync_config.max_batch_retries,
@@ -455,7 +596,7 @@ class TokenService:
                             time.sleep(self.sync_config.delay_between_interval_requests_seconds)
 
                         weekly_batch_analysis = self.__get_batch_analysis_with_retry(
-                            stock_batch=stock_batch,
+                            stock_batch=syncable_batch,
                             interval=Interval.INTERVAL_1_WEEK,
                             timeout=timeout,
                             max_batch_retries=self.sync_config.max_batch_retries,
@@ -463,7 +604,7 @@ class TokenService:
                         )
 
                         batch_success, batch_failed = self.__process_successful_batch(
-                            stock_batch=stock_batch,
+                            stock_batch=syncable_batch,
                             daily_batch_analysis=daily_batch_analysis,
                             weekly_batch_analysis=weekly_batch_analysis,
                             current_date=current_date,
@@ -477,7 +618,7 @@ class TokenService:
 
                         print(
                             f"Failed batch for screener={screener}, "
-                            f"batch={batch_index}, size={len(stock_batch)}: {error_message}"
+                            f"batch={batch_index}, size={len(syncable_batch)}: {error_message}"
                         )
 
                         if self.__is_rate_limit_error(error_message):
@@ -506,7 +647,7 @@ class TokenService:
                             )
 
                         fallback_success, fallback_failed, aborted_due_to_rate_limit = self.__fallback_batch_to_single(
-                            stock_batch=stock_batch,
+                            stock_batch=syncable_batch,
                             current_date=current_date,
                             original_batch_error=error_message,
                             timeout=timeout,
@@ -551,6 +692,7 @@ class TokenService:
                     f"Token data insertion completed. "
                     f"Selected: {len(stocks)}, "
                     f"Processed batches: {processed_batches}/{max_batches_per_run}, "
+                    f"Skipped non-trading duplicates: {skipped_non_trading_count}, "
                     f"Successful: {successfully_fetched_count}, "
                     f"Failed: {failed_fetched_count}"
                 ),
@@ -558,6 +700,7 @@ class TokenService:
                     "total_stocks_selected": len(stocks),
                     "processed_batches": processed_batches,
                     "max_batches_per_run": max_batches_per_run,
+                    "skipped_non_trading_count": skipped_non_trading_count,
                     "successfully_fetched_count": successfully_fetched_count,
                     "failed_fetched_count": failed_fetched_count,
                 },
@@ -573,7 +716,7 @@ class TokenService:
     def token_list(self, user=None):
         most_recent_stock_data = self.repository.list_latest_stock_data(user=user)
 
-        stock_list = []
+        stock_list = {}
         crypto_list = []
         wishlist = []
 
@@ -585,7 +728,8 @@ class TokenService:
             elif str(stock_data.stock.screener).lower() == "crypto":
                 crypto_list.append(item)
             else:
-                stock_list.append(item)
+                sector = stock_data.stock.sector or "Uncategorized"
+                stock_list.setdefault(sector, []).append(item)
 
         return self.__service_response(
             status=True,
@@ -634,6 +778,208 @@ class TokenService:
                 "stock_data": stock_data,
             },
         )
+
+    def search_tickers(self, query):
+        try:
+            tickers = self.repository.search_tickers(query)
+
+            return self.__service_response(
+                status=True,
+                message="success",
+                data={"tickers": tickers},
+            )
+        except Exception as exc:
+            return self.__service_response(
+                status=False,
+                message=f"Failed to search tickers: {str(exc)}",
+                data=None,
+            )
+
+    def insert_individual_token(self, payload):
+        try:
+            ticker = self.repository.normalize_ticker(payload.get("ticker", ""))
+            name = (payload.get("name") or "").strip() or None
+            exchange = self.repository.normalize_exchange(payload.get("exchange", ""))
+            screener = self.repository.normalize_screener(payload.get("screener", "america"))
+            category = (payload.get("category") or "").strip() or None
+            sector = (payload.get("sector") or "").strip() or None
+            industry = (payload.get("industry") or "").strip() or None
+
+            if not ticker:
+                return self.__service_response(
+                    status=False,
+                    message="Ticker is required.",
+                    data=None,
+                    http_status=400,
+                )
+
+            if not exchange:
+                return self.__service_response(
+                    status=False,
+                    message="Exchange is required.",
+                    data=None,
+                    http_status=400,
+                )
+
+            if screener not in ALLOWED_MANUAL_SCREENERS:
+                return self.__service_response(
+                    status=False,
+                    message="Screener must be one of america, canada, or crypto.",
+                    data=None,
+                    http_status=400,
+                )
+
+            if self.repository.stock_exists_by_ticker(ticker):
+                return self.__service_response(
+                    status=False,
+                    message=f"{ticker} already exists.",
+                    data=None,
+                    http_status=409,
+                )
+
+            stock = self.repository.insert_individual_stock(
+                ticker=ticker,
+                name=name,
+                screener=screener,
+                exchange=exchange,
+                category=category,
+                sector=sector,
+                industry=industry,
+            )
+
+            if stock is None:
+                return self.__service_response(
+                    status=False,
+                    message="Failed to insert stock.",
+                    data=None,
+                )
+
+            return self.__service_response(
+                status=True,
+                message=f"{ticker} created successfully.",
+                data={
+                    "stock": {
+                        "id": stock.id,
+                        "ticker": stock.ticker,
+                        "slug": slugify(stock.ticker),
+                        "name": stock.name,
+                        "screener": stock.screener,
+                        "exchange": stock.exchange,
+                        "category": stock.category,
+                        "sector": stock.sector,
+                        "industry": stock.industry,
+                        "in_use": stock.in_use,
+                    }
+                },
+                http_status=201,
+            )
+        except Exception as exc:
+            return self.__service_response(
+                status=False,
+                message=f"Failed to insert stock: {str(exc)}",
+                data=None,
+            )
+
+    def list_all_stocks_for_edit(self):
+        try:
+            stocks = self.repository.list_stocks()
+
+            return self.__service_response(
+                status=True,
+                message="success",
+                data={
+                    "stocks": [self.__present_stock_for_edit(stock) for stock in stocks]
+                },
+            )
+        except Exception as exc:
+            return self.__service_response(
+                status=False,
+                message=f"Failed to load stocks: {str(exc)}",
+                data=None,
+            )
+
+    def update_individual_token(self, stock_id, payload):
+        try:
+            stock = self.repository.get_stock_by_id(stock_id)
+            if stock is None:
+                return self.__service_response(
+                    status=False,
+                    message="Stock not found.",
+                    data=None,
+                    http_status=404,
+                )
+
+            ticker = self.repository.normalize_ticker(payload.get("ticker", ""))
+            name = (payload.get("name") or "").strip() or None
+            screener = self.repository.normalize_screener(payload.get("screener", "america"))
+            exchange = self.repository.normalize_exchange(payload.get("exchange", ""))
+            category = (payload.get("category") or "").strip() or None
+            sector = (payload.get("sector") or "").strip() or None
+            industry = (payload.get("industry") or "").strip() or None
+            in_use = bool(payload.get("in_use", False))
+
+            if not ticker:
+                return self.__service_response(
+                    status=False,
+                    message="Ticker is required.",
+                    data=None,
+                    http_status=400,
+                )
+
+            if not exchange:
+                return self.__service_response(
+                    status=False,
+                    message="Exchange is required.",
+                    data=None,
+                    http_status=400,
+                )
+
+            if screener not in ALLOWED_MANUAL_SCREENERS:
+                return self.__service_response(
+                    status=False,
+                    message="Screener must be one of america, canada, or crypto.",
+                    data=None,
+                    http_status=400,
+                )
+
+            if self.repository.stock_exists_by_ticker_excluding_id(stock_id, ticker):
+                return self.__service_response(
+                    status=False,
+                    message=f"{ticker} already exists.",
+                    data=None,
+                    http_status=409,
+                )
+
+            updated_stock = self.repository.update_stock(
+                stock,
+                ticker=ticker,
+                name=name,
+                screener=screener,
+                exchange=exchange,
+                category=category,
+                sector=sector,
+                industry=industry,
+                in_use=in_use,
+            )
+
+            if updated_stock is None:
+                return self.__service_response(
+                    status=False,
+                    message="Failed to update stock.",
+                    data=None,
+                )
+
+            return self.__service_response(
+                status=True,
+                message=f"{updated_stock.ticker} updated successfully.",
+                data={"stock": self.__present_stock_for_edit(updated_stock)},
+            )
+        except Exception as exc:
+            return self.__service_response(
+                status=False,
+                message=f"Failed to update stock: {str(exc)}",
+                data=None,
+            )
 
     def __build_stock_data_payload(
         self,
@@ -748,10 +1094,25 @@ class TokenService:
             payload[model_field] = daily_stock_analysis.indicators.get(indicator_key)
 
         return payload
+
+    def __present_stock_for_edit(self, stock):
+        return {
+            "id": stock.id,
+            "ticker": stock.ticker,
+            "name": stock.name,
+            "screener": stock.screener,
+            "exchange": stock.exchange,
+            "category": stock.category,
+            "sector": stock.sector,
+            "industry": stock.industry,
+            "in_use": stock.in_use,
+            "image_url": stock.image_url,
+        }
     
-    def __service_response(self, status, message, data=None):
+    def __service_response(self, status, message, data=None, http_status=None):
         return {
             "status": status,
             "message": message,
             "data": data,
+            "http_status": http_status,
         }

@@ -2,6 +2,10 @@ from django.urls import path
 from api.views.token_views import (
     home_page,
     token_detail,
+    token_search,
+    list_stocks_for_edit,
+    insert_individual_token,
+    update_individual_token,
     sync_tokens,
     sync_token_data,
     sync_token_data_status,
@@ -23,6 +27,10 @@ urlpatterns = [
 
     # frontend
     path("", home_page, name="home_page"),
+    path("token/create/", insert_individual_token, name="insert_individual_token"),
+    path("token/edit-options/", list_stocks_for_edit, name="list_stocks_for_edit"),
+    path("token/search/", token_search, name="token_search"),
+    path("token/<int:stock_id>/update/", update_individual_token, name="update_individual_token"),
     path("token/<str:ticker>/", token_detail, name="token_detail"),
     path("token/wishlist/toggle/", toggle_wishlist, name="toggle_wishlist"),
 

@@ -3,6 +3,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 from django.db import transaction
 from django.utils import timezone
+import json
 import logging
 import threading
 from datetime import timedelta
@@ -109,6 +110,59 @@ def token_detail(request, ticker):
     return __service_json_response(result)
 
 
+@require_GET
+def token_search(request):
+    query = request.GET.get("q", "")
+    result = token_service.search_tickers(query)
+    return __service_json_response(result)
+
+
+@require_GET
+def list_stocks_for_edit(request):
+    result = token_service.list_all_stocks_for_edit()
+    return __service_json_response(result)
+
+
+@require_POST
+def insert_individual_token(request):
+    try:
+        payload = json.loads(request.body or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse(
+            {
+                "response": {
+                    "status": False,
+                    "message": "Invalid JSON body.",
+                    "data": None,
+                }
+            },
+            status=400,
+        )
+
+    result = token_service.insert_individual_token(payload)
+    return __service_json_response(result)
+
+
+@require_POST
+def update_individual_token(request, stock_id):
+    try:
+        payload = json.loads(request.body or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse(
+            {
+                "response": {
+                    "status": False,
+                    "message": "Invalid JSON body.",
+                    "data": None,
+                }
+            },
+            status=400,
+        )
+
+    result = token_service.update_individual_token(stock_id, payload)
+    return __service_json_response(result)
+
+
 @csrf_exempt
 @require_POST
 @require_cron_secret
@@ -194,5 +248,5 @@ def reset_in_use(request):
     return __service_json_response(result)
 
 def __service_json_response(result):
-    status_code = 200 if result["status"] else 500
+    status_code = result.get("http_status", 200 if result["status"] else 500)
     return JsonResponse({"response": result}, status=status_code)

@@ -1,5 +1,5 @@
 from api.models import Stock, StockData, Wishlist
-from django.db.models import OuterRef, Subquery, Exists, IntegerField, Case, When, Value
+from django.db.models import OuterRef, Subquery, Exists, IntegerField, Case, When, Value, Q
 from django.utils import timezone
 import logging
 
@@ -95,6 +95,110 @@ class TokenRepository:
             ticker=self.normalize_ticker(ticker)
         ).order_by("exchange", "screener")
 
+    def get_stock_by_id(self, stock_id):
+        return Stock.objects.filter(id=stock_id).first()
+
+    def stock_exists_by_ticker(self, ticker):
+        return Stock.objects.filter(
+            ticker=self.normalize_ticker(ticker)
+        ).exists()
+
+    def stock_exists_by_ticker_excluding_id(self, stock_id, ticker):
+        return (
+            Stock.objects.filter(ticker=self.normalize_ticker(ticker))
+            .exclude(id=stock_id)
+            .exists()
+        )
+
+    def search_tickers(self, query):
+        normalized_query = self.normalize_ticker(query)
+
+        if not normalized_query:
+            return []
+
+        startswith_matches = list(
+            Stock.objects.filter(ticker__istartswith=normalized_query)
+            .order_by("ticker")
+            .values_list("ticker", flat=True)
+            .distinct()
+        )
+
+        contains_matches = list(
+            Stock.objects.filter(
+                Q(ticker__icontains=normalized_query) & ~Q(ticker__istartswith=normalized_query)
+            )
+            .order_by("ticker")
+            .values_list("ticker", flat=True)
+            .distinct()
+        )
+
+        return startswith_matches + contains_matches
+
+    def insert_individual_stock(
+        self,
+        ticker,
+        name,
+        screener,
+        exchange,
+        category=None,
+        sector=None,
+        industry=None,
+    ):
+        try:
+            stock = Stock.objects.create(
+                ticker=self.normalize_ticker(ticker),
+                name=name,
+                screener=self.normalize_screener(screener),
+                exchange=self.normalize_exchange(exchange),
+                category=category,
+                sector=sector,
+                industry=industry,
+                in_use=True,
+            )
+            return stock
+        except Exception:
+            logger.exception(
+                "Failed to insert individual stock. ticker=%s, exchange=%s, screener=%s",
+                ticker,
+                exchange,
+                screener,
+            )
+            return None
+
+    def update_stock(
+        self,
+        stock,
+        *,
+        ticker,
+        name,
+        screener,
+        exchange,
+        category,
+        sector,
+        industry,
+        in_use,
+    ):
+        try:
+            stock.ticker = self.normalize_ticker(ticker)
+            stock.name = name
+            stock.screener = self.normalize_screener(screener)
+            stock.exchange = self.normalize_exchange(exchange)
+            stock.category = category
+            stock.sector = sector
+            stock.industry = industry
+            stock.in_use = in_use
+            stock.save()
+            return stock
+        except Exception:
+            logger.exception(
+                "Failed to update stock. stock_id=%s ticker=%s exchange=%s screener=%s",
+                getattr(stock, "id", None),
+                ticker,
+                exchange,
+                screener,
+            )
+            return None
+
     def create_stock_data(self, payload):
         try:
             StockData.objects.create(**payload)
@@ -117,6 +221,13 @@ class TokenRepository:
 
     def get_latest_stock_data(self, stock):
         return StockData.objects.filter(stock=stock).order_by("-date").first()
+
+    def stock_data_exists_in_range(self, stock, start_date, end_date):
+        return StockData.objects.filter(
+            stock=stock,
+            date__gte=start_date,
+            date__lt=end_date,
+        ).exists()
     
     def list_stock_data_by_ticker(self, ticker):
         normalized_ticker = self.normalize_ticker(ticker)
