@@ -403,7 +403,6 @@ class TokenService:
             weekly_stock_analysis = weekly_batch_analysis.get(symbol_key)
 
             if daily_stock_analysis is None or weekly_stock_analysis is None:
-                failed_count += 1
                 reason = (
                     "missing analysis from successful batch. "
                     f"daily_found={daily_stock_analysis is not None}, "
@@ -412,8 +411,38 @@ class TokenService:
                 print(
                     f"[BAD SYMBOL] {symbol_key} {reason}"
                 )
-                self.__disable_stock_for_sync_failure(stock, reason)
-                continue
+
+                try:
+                    if daily_stock_analysis is None:
+                        daily_stock_analysis = self.__get_single_analysis_with_retry(
+                            stock=stock,
+                            interval=Interval.INTERVAL_1_DAY,
+                            timeout=self.sync_config.timeout,
+                            max_single_retries=self.sync_config.max_single_retries,
+                            retry_delay_seconds=self.sync_config.retry_delay_seconds,
+                        )
+
+                    if (
+                        weekly_stock_analysis is None
+                        and self.sync_config.delay_between_interval_requests_seconds > 0
+                    ):
+                        time.sleep(self.sync_config.delay_between_interval_requests_seconds)
+
+                    if weekly_stock_analysis is None:
+                        weekly_stock_analysis = self.__get_single_analysis_with_retry(
+                            stock=stock,
+                            interval=Interval.INTERVAL_1_WEEK,
+                            timeout=self.sync_config.timeout,
+                            max_single_retries=self.sync_config.max_single_retries,
+                            retry_delay_seconds=self.sync_config.retry_delay_seconds,
+                        )
+                except Exception as exc:
+                    failed_count += 1
+                    self.__disable_stock_for_sync_failure(
+                        stock,
+                        f"{reason}; single-symbol recovery failed: {str(exc)}",
+                    )
+                    continue
 
             created, failed_increment = self.__create_stock_data_from_analysis(
                 stock=stock,
