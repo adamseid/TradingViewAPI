@@ -75,6 +75,12 @@ class TokenPresenter:
         }
 
     def present_stock_detail_item(self, stock_data):
+        ma_score = self.calculator.round_significant(
+            (stock_data.ma_50d_score or 0)
+            + (stock_data.ma_100d_score or 0)
+            + (stock_data.ma_200d_score or 0)
+        )
+
         return {
             "id": stock_data.id,
             "date": stock_data.date,
@@ -84,6 +90,8 @@ class TokenPresenter:
             "current_price": self.calculator.round_significant(stock_data.current_price),
             "resistance": self.calculator.round_significant(stock_data.resistance),
             "support": self.calculator.round_significant(stock_data.support),
+            "sma_200": self.calculator.round_significant(stock_data.sma_200),
+            "ma_score": ma_score,
             "support_resistance_score": self.calculator.round_significant(
                 stock_data.support_resistance_score
             ),

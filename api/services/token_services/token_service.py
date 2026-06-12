@@ -1070,11 +1070,11 @@ class TokenService:
         if prev_stock_data is not None:
             daily_macd_velocity = self.calculator.get_macd_velocity(
                 daily_macd_histogram,
-                prev_stock_data,
+                prev_stock_data.daily_macd_histogram,
             )
             weekly_macd_velocity = self.calculator.get_macd_velocity(
                 weekly_macd_histogram,
-                prev_stock_data,
+                prev_stock_data.weekly_macd_histogram,
             )
             daily_macd_score = self.calculator.get_macd_score(
                 daily_macd_histogram,

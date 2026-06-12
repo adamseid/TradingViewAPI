@@ -28,10 +28,10 @@ class TokenScoreCalculator:
         return 0
 
     @staticmethod
-    def get_macd_velocity(macd, prev_stock_data):
-        if macd is None or prev_stock_data is None or prev_stock_data.daily_macd_histogram is None:
+    def get_macd_velocity(macd, previous_macd):
+        if macd is None or previous_macd is None:
             return None
-        return float(macd) - float(prev_stock_data.daily_macd_histogram)
+        return float(macd) - float(previous_macd)
 
     @staticmethod
     def get_macd_score(macd, macd_velocity):
