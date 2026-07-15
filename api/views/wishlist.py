@@ -1,12 +1,11 @@
 import json
 
 from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
-from api.services.wishlist_services.wishlist_services import WishlistService
+from api.operations.wishlist import Wishlist
 
-wishlist_service = WishlistService()
+wishlist = Wishlist()
 
 
 @require_POST
@@ -53,16 +52,14 @@ def toggle_wishlist(request):
             status=400,
         )
 
-    result = wishlist_service.toggle_wishlist(user=request.user, stock_id=stock_id)
-    return __service_json_response(result)
-
-def __service_json_response(result):
-    status_code = result.get("http_status", 200 if result["status"] else 500)
-
-    response_payload = {
-        "status": result["status"],
-        "message": result["message"],
-        "data": result["data"],
-    }
-
-    return JsonResponse({"response": response_payload}, status=status_code)
+    result = wishlist.toggle_wishlist(user=request.user, stock_id=stock_id)
+    return JsonResponse(
+        {
+            "response": {
+                "status": result["status"],
+                "message": result["message"],
+                "data": result["data"],
+            }
+        },
+        status=result.get("http_status", 200 if result["status"] else 500),
+    )

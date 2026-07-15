@@ -133,8 +133,9 @@ class StockData(models.Model):
     daily_macd_score = models.DecimalField(max_digits=15, decimal_places=6, null=True)
     weekly_macd_velocity = models.DecimalField(max_digits=15, decimal_places=6, null=True)
     weekly_macd_score = models.DecimalField(max_digits=15, decimal_places=6, null=True)
-    total_score = models.DecimalField(max_digits=15, decimal_places=6, null=True)
-    direction = models.DecimalField(max_digits=15, decimal_places=6, null=True)
+    strategy_one_score = models.DecimalField(max_digits=15, decimal_places=6, null=True)
+    strategy_two_score = models.DecimalField(max_digits=15, decimal_places=6, null=True)
+    strategy_three_score = models.DecimalField(max_digits=15, decimal_places=6, null=True)
 
     class Meta:
         db_table = "stock_data"
