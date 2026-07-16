@@ -437,6 +437,8 @@ class Token:
             "current_price": stock_data.current_price,
             "resistance": stock_data.resistance,
             "support": stock_data.support,
+            "sma_50": stock_data.sma_50,
+            "sma_100": stock_data.sma_100,
             "sma_200": stock_data.sma_200,
             "ma_score": ma_score,
             "support_resistance_score": stock_data.support_resistance_score,
