@@ -17,8 +17,12 @@ sync = Sync()
 logger = logging.getLogger(__name__)
 _sync_token_data_lock = threading.Lock()
 _sync_token_data_thread = None
+_recalculate_scores_lock = threading.Lock()
+_recalculate_scores_thread = None
 SYNC_JOB_LOCK_NAME = "token_data_sync"
+RECALCULATE_SCORES_JOB_LOCK_NAME = "score_recalculation"
 SYNC_JOB_STALE_AFTER = timedelta(hours=2)
+RECALCULATE_SCORES_JOB_STALE_AFTER = timedelta(hours=2)
 
 
 @csrf_exempt
@@ -100,6 +104,8 @@ def reset_in_use(request):
 @csrf_exempt
 @require_POST
 def recalculate_scores(request):
+    global _recalculate_scores_thread
+
     try:
         payload = json.loads(request.body or "{}")
     except json.JSONDecodeError:
@@ -128,16 +134,54 @@ def recalculate_scores(request):
             status=400,
         )
 
-    result = sync.recalculate_scores(score.strip())
+    normalized_score = score.strip()
+
+    if not _acquire_job_lock(
+        RECALCULATE_SCORES_JOB_LOCK_NAME,
+        RECALCULATE_SCORES_JOB_STALE_AFTER,
+    ):
+        return JsonResponse(
+            {
+                "response": {
+                    "status": False,
+                    "message": "Score recalculation job still running.",
+                    "data": {
+                        "started": False,
+                        "already_running": True,
+                        "score": normalized_score,
+                    },
+                }
+            },
+            status=409,
+        )
+
+    with _recalculate_scores_lock:
+        try:
+            _recalculate_scores_thread = threading.Thread(
+                target=_run_recalculate_scores,
+                args=(normalized_score,),
+                name="score-recalculation",
+                daemon=True,
+            )
+            _recalculate_scores_thread.start()
+        except Exception:
+            _release_job_lock(RECALCULATE_SCORES_JOB_LOCK_NAME)
+            _recalculate_scores_thread = None
+            raise
+
     return JsonResponse(
         {
             "response": {
-                "status": result["status"],
-                "message": result["message"],
-                "data": result["data"],
+                "status": True,
+                "message": f"Score recalculation started for {normalized_score}.",
+                "data": {
+                    "started": True,
+                    "already_running": False,
+                    "score": normalized_score,
+                },
             }
         },
-        status=result.get("http_status", 200 if result["status"] else 500),
+        status=200,
     )
 
 
@@ -149,14 +193,15 @@ def _run_token_data_sync():
 
     try:
         result = sync.insert_tokens_data()
-        _record_sync_job_result(result)
+        _record_job_result(SYNC_JOB_LOCK_NAME, result)
         logger.info("Background token data sync finished. result=%s", result)
         logger.info(
             "Token data sync completion message: %s",
             result.get("message"),
         )
     except Exception:
-        _record_sync_job_result(
+        _record_job_result(
+            SYNC_JOB_LOCK_NAME,
             {
                 "status": False,
                 "message": "Token data sync crashed before completion.",
@@ -165,21 +210,48 @@ def _run_token_data_sync():
         )
         logger.exception("Background token data sync crashed.")
     finally:
-        _release_sync_job_lock()
+        _release_job_lock(SYNC_JOB_LOCK_NAME)
         with _sync_token_data_lock:
             _sync_token_data_thread = None
 
 
+def _run_recalculate_scores(score):
+    global _recalculate_scores_thread
+
+    try:
+        result = sync.recalculate_scores(score)
+        _record_job_result(RECALCULATE_SCORES_JOB_LOCK_NAME, result)
+        logger.info("Background score recalculation finished. score=%s result=%s", score, result)
+    except Exception:
+        _record_job_result(
+            RECALCULATE_SCORES_JOB_LOCK_NAME,
+            {
+                "status": False,
+                "message": f"Score recalculation for {score} crashed before completion.",
+                "data": {"score": score},
+            }
+        )
+        logger.exception("Background score recalculation crashed. score=%s", score)
+    finally:
+        _release_job_lock(RECALCULATE_SCORES_JOB_LOCK_NAME)
+        with _recalculate_scores_lock:
+            _recalculate_scores_thread = None
+
+
 def _acquire_sync_job_lock():
+    return _acquire_job_lock(SYNC_JOB_LOCK_NAME, SYNC_JOB_STALE_AFTER)
+
+
+def _acquire_job_lock(job_name, stale_after):
     now = timezone.now()
 
     with transaction.atomic():
         lock, _ = SyncJobLock.objects.select_for_update().get_or_create(
-            name=SYNC_JOB_LOCK_NAME,
+            name=job_name,
             defaults={"is_running": False},
         )
 
-        if lock.is_running and lock.started_at and now - lock.started_at <= SYNC_JOB_STALE_AFTER:
+        if lock.is_running and lock.started_at and now - lock.started_at <= stale_after:
             return False
 
         lock.is_running = True
@@ -189,10 +261,14 @@ def _acquire_sync_job_lock():
 
 
 def _release_sync_job_lock():
+    _release_job_lock(SYNC_JOB_LOCK_NAME)
+
+
+def _release_job_lock(job_name):
     with transaction.atomic():
         lock = (
             SyncJobLock.objects.select_for_update()
-            .filter(name=SYNC_JOB_LOCK_NAME)
+            .filter(name=job_name)
             .first()
         )
         if lock is None:
@@ -204,9 +280,13 @@ def _release_sync_job_lock():
 
 
 def _record_sync_job_result(result):
+    _record_job_result(SYNC_JOB_LOCK_NAME, result)
+
+
+def _record_job_result(job_name, result):
     with transaction.atomic():
         lock, _ = SyncJobLock.objects.select_for_update().get_or_create(
-            name=SYNC_JOB_LOCK_NAME,
+            name=job_name,
             defaults={"is_running": False},
         )
         lock.last_finished_at = timezone.now()

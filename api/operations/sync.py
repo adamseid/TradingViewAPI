@@ -6,7 +6,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from django.db.models import Case, F, IntegerField, Q, Value, When, Window
-from django.db.models.functions import RowNumber
+from django.db.models.functions import DenseRank, RowNumber, TruncDate
 from django.utils import timezone
 from tradingview_ta import Interval, TA_Handler, get_multiple_analysis
 
@@ -571,7 +571,7 @@ class Sync:
             for stock_data in stock_data_rows:
                 recalculated_values = self._build_recalculated_score_values(
                     stock_data=stock_data,
-                    previous_strategy_one_scores=strategy_one_history_by_stock_id.get(stock_data.stock_id, []),
+                    previous_stock_data=strategy_one_history_by_stock_id.get(stock_data.stock_id, []),
                 )
 
                 stock_data.support_resistance_score = recalculated_values["support_resistance_score"]
@@ -587,9 +587,12 @@ class Sync:
                     stock_data.strategy_two_score = recalculated_values["strategy_two_score"]
 
                 strategy_one_history = strategy_one_history_by_stock_id.setdefault(stock_data.stock_id, [])
-                strategy_one_history.append(recalculated_values["strategy_one_score"])
-                if len(strategy_one_history) > 2:
-                    del strategy_one_history[:-2]
+                strategy_one_history.append(
+                    {
+                        "date": stock_data.date,
+                        "strategy_one_score": recalculated_values["strategy_one_score"],
+                    }
+                )
 
             StockData.objects.bulk_update(
                 stock_data_rows,
@@ -972,6 +975,7 @@ class Sync:
             
             strategy_two_score = self._calculate_strategy_two_score(
                 strategy_one_score,
+                current_date,
                 recent_stock_data,
             )
 
@@ -1034,14 +1038,20 @@ class Sync:
         recent_stock_data = (
             StockData.objects.filter(stock_id__in=stock_ids)
             .annotate(
+                market_day=TruncDate("date", tzinfo=MARKET_TIMEZONE),
+                day_rank=Window(
+                    expression=DenseRank(),
+                    partition_by=[F("stock_id")],
+                    order_by=[F("market_day").desc()],
+                ),
                 row_number=Window(
                     expression=RowNumber(),
                     partition_by=[F("stock_id")],
                     order_by=[F("date").desc(), F("id").desc()],
                 )
             )
-            .filter(row_number__lte=2)
-            .order_by("stock_id", "row_number")
+            .filter(day_rank__lte=3)
+            .order_by("stock_id", "-market_day", "row_number")
         )
 
         for stock_data in recent_stock_data:
@@ -1195,7 +1205,7 @@ class Sync:
     def _build_recalculated_score_values(
         self,
         stock_data,
-        previous_strategy_one_scores,
+        previous_stock_data,
     ):
         support_resistance_score = self._get_support_resistance_score(
             stock_data.support,
@@ -1224,15 +1234,11 @@ class Sync:
             weekly_macd_score=weekly_macd_score,
         )
 
-        strategy_two_score = None
-        if len(previous_strategy_one_scores) >= 2 and not any(
-            score is None for score in previous_strategy_one_scores[-2:]
-        ):
-            strategy_two_score = (
-                Decimal(str(strategy_one_score))
-                + Decimal(str(previous_strategy_one_scores[-1]))
-                + Decimal(str(previous_strategy_one_scores[-2]))
-            ) / Decimal("3")
+        strategy_two_score = self._calculate_strategy_two_score(
+            strategy_one_score,
+            stock_data.date,
+            previous_stock_data,
+        )
 
         return {
             "support_resistance_score": support_resistance_score,
@@ -1277,20 +1283,45 @@ class Sync:
             + weekly_macd_score
         )
 
-    def _calculate_strategy_two_score(self, strategy_one_score, recent_stock_data):
-        if strategy_one_score is None or len(recent_stock_data) < 2:
+    def _calculate_strategy_two_score(self, strategy_one_score, current_date, recent_stock_data):
+        if strategy_one_score is None:
             return None
 
-        previous_scores = [
-            stock_data.strategy_one_score
-            for stock_data in recent_stock_data[:2]
-        ]
-
-        if any(score is None for score in previous_scores):
-            return None
-
-        return (
+        scores_by_market_day = {}
+        current_market_day = timezone.localtime(current_date, MARKET_TIMEZONE).date()
+        scores_by_market_day.setdefault(current_market_day, []).append(
             Decimal(str(strategy_one_score))
-            + Decimal(str(previous_scores[0]))
-            + Decimal(str(previous_scores[1]))
-        ) / Decimal("3")
+        )
+
+        for stock_data in recent_stock_data:
+            historical_score = (
+                stock_data.get("strategy_one_score")
+                if isinstance(stock_data, dict)
+                else stock_data.strategy_one_score
+            )
+            historical_date = (
+                stock_data.get("date")
+                if isinstance(stock_data, dict)
+                else stock_data.date
+            )
+
+            if historical_score is None or historical_date is None:
+                continue
+
+            market_day = timezone.localtime(historical_date, MARKET_TIMEZONE).date()
+            scores_by_market_day.setdefault(market_day, []).append(
+                Decimal(str(historical_score))
+            )
+
+        market_days = sorted(scores_by_market_day.keys(), reverse=True)
+        if len(market_days) < 3:
+            return None
+
+        three_day_scores = []
+        for market_day in market_days[:3]:
+            three_day_scores.extend(scores_by_market_day[market_day])
+
+        if not three_day_scores:
+            return None
+
+        return sum(three_day_scores) / Decimal(str(len(three_day_scores)))
