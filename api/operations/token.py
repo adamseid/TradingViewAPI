@@ -381,62 +381,11 @@ class Token:
         )
 
     def _present_latest_stock_item(self, stock_data):
-        strategy_one_score = (
-            None
-            if stock_data.strategy_one_score is None
-            else round(stock_data.strategy_one_score, 3)
-        )
-        strategy_two_score = (
-            None
-            if stock_data.strategy_two_score is None
-            else round(stock_data.strategy_two_score, 3)
-        )
-        current_price = None if stock_data.current_price is None else round(stock_data.current_price, 3)
-        support_resistance_score = (
-            None
-            if stock_data.support_resistance_score is None
-            else round(stock_data.support_resistance_score, 3)
-        )
-        daily_macd_velocity = (
-            None
-            if stock_data.daily_macd_velocity is None
-            else round(stock_data.daily_macd_velocity, 3)
-        )
-        daily_macd_score = (
-            None
-            if stock_data.daily_macd_score is None
-            else round(stock_data.daily_macd_score, 3)
-        )
-        weekly_macd_velocity = (
-            None
-            if stock_data.weekly_macd_velocity is None
-            else round(stock_data.weekly_macd_velocity, 3)
-        )
-        weekly_macd_score = (
-            None
-            if stock_data.weekly_macd_score is None
-            else round(stock_data.weekly_macd_score, 3)
-        )
-
-        ma_50d_score = None if stock_data.ma_50d_score is None else round(stock_data.ma_50d_score, 3)
-        ma_100d_score = None if stock_data.ma_100d_score is None else round(stock_data.ma_100d_score, 3)
-        ma_200d_score = None if stock_data.ma_200d_score is None else round(stock_data.ma_200d_score, 3)
-        ma_score_raw = (
+        ma_score = (
             (stock_data.ma_50d_score or 0)
             + (stock_data.ma_100d_score or 0)
             + (stock_data.ma_200d_score or 0)
         )
-        ma_score = round(ma_score_raw, 3)
-
-        daily_profit = None
-        daily_return = None
-        if stock_data.current_price is not None and stock_data.price_change is not None:
-            daily_profit_raw = stock_data.current_price * (stock_data.price_change / 100)
-            daily_profit = round(daily_profit_raw, 3)
-
-            denominator = daily_profit_raw + stock_data.current_price
-            if denominator != 0:
-                daily_return = round(daily_profit_raw / denominator, 3)
 
         return {
             "stock_id": stock_data.stock.id,
@@ -452,34 +401,31 @@ class Token:
             "date": stock_data.date,
             "strategy_one_direction": self._calculate_direction(stock_data.strategy_one_score),
             "strategy_two_direction": self._calculate_direction(stock_data.strategy_two_score),
-            "current_price": current_price,
-            "price_change": None if stock_data.price_change is None else round(stock_data.price_change, 3),
-            "daily_profit": daily_profit,
-            "daily_return": daily_return,
-            "support": None if stock_data.support is None else round(stock_data.support, 3),
-            "resistance": None if stock_data.resistance is None else round(stock_data.resistance, 3),
-            "support_resistance_score": support_resistance_score,
-            "ma_50d_score": ma_50d_score,
-            "ma_100d_score": ma_100d_score,
-            "ma_200d_score": ma_200d_score,
+            "current_price": stock_data.current_price,
+            "price_change": stock_data.price_change,
+            "support": stock_data.support,
+            "resistance": stock_data.resistance,
+            "support_resistance_score": stock_data.support_resistance_score,
+            "ma_50d_score": stock_data.ma_50d_score,
+            "ma_100d_score": stock_data.ma_100d_score,
+            "ma_200d_score": stock_data.ma_200d_score,
             "ma_score": ma_score,
-            "daily_macd_velocity": daily_macd_velocity,
-            "daily_macd_score": daily_macd_score,
-            "weekly_macd_velocity": weekly_macd_velocity,
-            "weekly_macd_score": weekly_macd_score,
-            "strategy_one_score": strategy_one_score,
-            "strategy_two_score": strategy_two_score,
+            "daily_macd_velocity": stock_data.daily_macd_velocity,
+            "daily_macd_score": stock_data.daily_macd_score,
+            "weekly_macd_velocity": stock_data.weekly_macd_velocity,
+            "weekly_macd_score": stock_data.weekly_macd_score,
+            "strategy_one_score": stock_data.strategy_one_score,
+            "strategy_two_score": stock_data.strategy_two_score,
             "kinematics_score": 0,
             "five_day_velocity_score": 0,
             "five_day_acceleration_score": 0,
         }
 
     def _present_token_detail_item(self, stock_data):
-        ma_score = round(
+        ma_score = (
             (stock_data.ma_50d_score or 0)
             + (stock_data.ma_100d_score or 0)
-            + (stock_data.ma_200d_score or 0),
-            3,
+            + (stock_data.ma_200d_score or 0)
         )
 
         return {
@@ -488,56 +434,20 @@ class Token:
             "ticker": stock_data.stock.ticker,
             "exchange": stock_data.stock.exchange,
             "screener": stock_data.stock.screener,
-            "current_price": None if stock_data.current_price is None else round(stock_data.current_price, 3),
-            "resistance": None if stock_data.resistance is None else round(stock_data.resistance, 3),
-            "support": None if stock_data.support is None else round(stock_data.support, 3),
-            "sma_200": None if stock_data.sma_200 is None else round(stock_data.sma_200, 3),
+            "current_price": stock_data.current_price,
+            "resistance": stock_data.resistance,
+            "support": stock_data.support,
+            "sma_200": stock_data.sma_200,
             "ma_score": ma_score,
-            "support_resistance_score": (
-                None
-                if stock_data.support_resistance_score is None
-                else round(stock_data.support_resistance_score, 3)
-            ),
-            "daily_macd_histogram": (
-                None
-                if stock_data.daily_macd_histogram is None
-                else round(stock_data.daily_macd_histogram, 3)
-            ),
-            "daily_macd_velocity": (
-                None
-                if stock_data.daily_macd_velocity is None
-                else round(stock_data.daily_macd_velocity, 3)
-            ),
-            "daily_macd_score": (
-                None
-                if stock_data.daily_macd_score is None
-                else round(stock_data.daily_macd_score, 3)
-            ),
-            "weekly_macd_histogram": (
-                None
-                if stock_data.weekly_macd_histogram is None
-                else round(stock_data.weekly_macd_histogram, 3)
-            ),
-            "weekly_macd_velocity": (
-                None
-                if stock_data.weekly_macd_velocity is None
-                else round(stock_data.weekly_macd_velocity, 3)
-            ),
-            "weekly_macd_score": (
-                None
-                if stock_data.weekly_macd_score is None
-                else round(stock_data.weekly_macd_score, 3)
-            ),
-            "strategy_one_score": (
-                None
-                if stock_data.strategy_one_score is None
-                else round(stock_data.strategy_one_score, 3)
-            ),
-            "strategy_two_score": (
-                None
-                if stock_data.strategy_two_score is None
-                else round(stock_data.strategy_two_score, 3)
-            ),
+            "support_resistance_score": stock_data.support_resistance_score,
+            "daily_macd_histogram": stock_data.daily_macd_histogram,
+            "daily_macd_velocity": stock_data.daily_macd_velocity,
+            "daily_macd_score": stock_data.daily_macd_score,
+            "weekly_macd_histogram": stock_data.weekly_macd_histogram,
+            "weekly_macd_velocity": stock_data.weekly_macd_velocity,
+            "weekly_macd_score": stock_data.weekly_macd_score,
+            "strategy_one_score": stock_data.strategy_one_score,
+            "strategy_two_score": stock_data.strategy_two_score,
             "strategy_one_direction": self._calculate_direction(stock_data.strategy_one_score),
             "strategy_two_direction": self._calculate_direction(stock_data.strategy_two_score),
         }
