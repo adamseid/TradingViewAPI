@@ -133,8 +133,8 @@ class StockData(models.Model):
     daily_macd_score = models.DecimalField(max_digits=15, decimal_places=6, null=True)
     weekly_macd_velocity = models.DecimalField(max_digits=15, decimal_places=6, null=True)
     weekly_macd_score = models.DecimalField(max_digits=15, decimal_places=6, null=True)
-    strategy_one_score = models.DecimalField(max_digits=15, decimal_places=6, null=True)
-    strategy_two_score = models.DecimalField(max_digits=15, decimal_places=6, null=True)
+    original_strategy_score = models.DecimalField(max_digits=15, decimal_places=6, null=True)
+    macd_strategy_score = models.DecimalField(max_digits=15, decimal_places=6, null=True)
     strategy_three_score = models.DecimalField(max_digits=15, decimal_places=6, null=True)
 
     class Meta:
@@ -183,3 +183,4 @@ class SyncJobLock(models.Model):
 
     def __str__(self):
         return f"{self.name} ({'running' if self.is_running else 'idle'})"
+

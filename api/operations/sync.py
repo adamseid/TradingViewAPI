@@ -530,15 +530,15 @@ class Sync:
             }
 
     def recalculate_scores(self, score):
-        score_field_map = {
-            "score1": "strategy_one_score",
-            "score2": "strategy_two_score",
-        }
+        valid_scores = {"original_strategy_score", "macd_strategy_score"}
 
-        if score not in score_field_map:
+        if score not in valid_scores:
             return {
                 "status": False,
-                "message": f"Invalid score '{score}'. Expected one of: score1, score2.",
+                "message": (
+                    f"Invalid score '{score}'. Expected one of: "
+                    "original_strategy_score, macd_strategy_score."
+                ),
                 "data": None,
                 "http_status": 400,
             }
@@ -556,7 +556,7 @@ class Sync:
                     "http_status": 200,
                 }
 
-            strategy_one_history_by_stock_id = {}
+            recent_macd_history_by_stock_id = {}
 
             fields_to_update = [
                 "support_resistance_score",
@@ -565,13 +565,13 @@ class Sync:
                 "ma_50d_score",
                 "daily_macd_score",
                 "weekly_macd_score",
-                score_field_map[score],
+                score,
             ]
 
             for stock_data in stock_data_rows:
                 recalculated_values = self._build_recalculated_score_values(
                     stock_data=stock_data,
-                    previous_stock_data=strategy_one_history_by_stock_id.get(stock_data.stock_id, []),
+                    previous_stock_data=recent_macd_history_by_stock_id.get(stock_data.stock_id, []),
                 )
 
                 stock_data.support_resistance_score = recalculated_values["support_resistance_score"]
@@ -581,17 +581,22 @@ class Sync:
                 stock_data.daily_macd_score = recalculated_values["daily_macd_score"]
                 stock_data.weekly_macd_score = recalculated_values["weekly_macd_score"]
 
-                if score == "score1":
-                    stock_data.strategy_one_score = recalculated_values["strategy_one_score"]
+                if score == "original_strategy_score":
+                    stock_data.original_strategy_score = recalculated_values["original_strategy_score"]
                 else:
-                    stock_data.strategy_two_score = recalculated_values["strategy_two_score"]
+                    stock_data.macd_strategy_score = recalculated_values["macd_strategy_score"]
 
-                strategy_one_history = strategy_one_history_by_stock_id.setdefault(stock_data.stock_id, [])
-                strategy_one_history.append(
+                recent_macd_history = recent_macd_history_by_stock_id.setdefault(stock_data.stock_id, [])
+                recent_macd_history.append(
                     {
                         "date": stock_data.date,
-                        "strategy_one_score": recalculated_values["strategy_one_score"],
+                        "daily_macd_velocity": stock_data.daily_macd_velocity,
+                        "weekly_macd_velocity": stock_data.weekly_macd_velocity,
                     }
+                )
+                recent_macd_history_by_stock_id[stock_data.stock_id] = self._limit_recent_history_to_market_days(
+                    recent_macd_history,
+                    3,
                 )
 
             StockData.objects.bulk_update(
@@ -943,17 +948,17 @@ class Sync:
         weekly_macd_velocity = None
         daily_macd_score = None
         weekly_macd_score = None
-        strategy_one_score = None
-        strategy_two_score = None
+        original_strategy_score = None
+        macd_strategy_score = None
 
         if prev_stock_data is not None:
             daily_macd_velocity = self._get_macd_velocity(
                 daily_macd_histogram,
-                prev_stock_data.daily_macd_histogram,
+                prev_stock_data.get("daily_macd_histogram"),
             )
             weekly_macd_velocity = self._get_macd_velocity(
                 weekly_macd_histogram,
-                prev_stock_data.weekly_macd_histogram,
+                prev_stock_data.get("weekly_macd_histogram"),
             )
             daily_macd_score = self._get_macd_score(
                 daily_macd_histogram,
@@ -964,7 +969,7 @@ class Sync:
                 weekly_macd_velocity,
             )
 
-            strategy_one_score = self._calculate_strategy_one_score(
+            raw_original_strategy_score = self._calculate_original_strategy_score(
                 support_resistance_score=support_resistance_score,
                 ma_50d_score=ma_50d_score,
                 ma_100d_score=ma_100d_score,
@@ -972,12 +977,18 @@ class Sync:
                 daily_macd_score=daily_macd_score,
                 weekly_macd_score=weekly_macd_score,
             )
-            
-            strategy_two_score = self._calculate_strategy_two_score(
-                strategy_one_score,
+
+            raw_macd_strategy_score = self._calculate_macd_strategy_score(
                 current_date,
                 recent_stock_data,
+                daily_macd_histogram,
+                weekly_macd_histogram,
+                daily_macd_velocity,
+                weekly_macd_velocity,
             )
+
+            original_strategy_score = self._normalizeScore(raw_original_strategy_score, -9, 9)
+            macd_strategy_score = self._normalizeScore(raw_macd_strategy_score, -4, 4)
 
         payload = {
             "date": current_date,
@@ -998,8 +1009,8 @@ class Sync:
             "daily_macd_score": daily_macd_score,
             "weekly_macd_velocity": weekly_macd_velocity,
             "weekly_macd_score": weekly_macd_score,
-            "strategy_one_score": strategy_one_score,
-            "strategy_two_score": strategy_two_score,
+            "original_strategy_score": original_strategy_score,
+            "macd_strategy_score": macd_strategy_score,
             "stock": stock,
         }
 
@@ -1055,7 +1066,15 @@ class Sync:
         )
 
         for stock_data in recent_stock_data:
-            recent_stock_data_by_stock_id.setdefault(stock_data.stock_id, []).append(stock_data)
+            recent_stock_data_by_stock_id.setdefault(stock_data.stock_id, []).append(
+                {
+                    "date": stock_data.date,
+                    "daily_macd_histogram": stock_data.daily_macd_histogram,
+                    "weekly_macd_histogram": stock_data.weekly_macd_histogram,
+                    "daily_macd_velocity": stock_data.daily_macd_velocity,
+                    "weekly_macd_velocity": stock_data.weekly_macd_velocity,
+                }
+            )
 
         return recent_stock_data_by_stock_id
     
@@ -1225,7 +1244,7 @@ class Sync:
             stock_data.weekly_macd_velocity,
         )
 
-        strategy_one_score = self._calculate_strategy_one_score(
+        raw_original_strategy_score = self._calculate_original_strategy_score(
             support_resistance_score=support_resistance_score,
             ma_50d_score=ma_50d_score,
             ma_100d_score=ma_100d_score,
@@ -1234,11 +1253,17 @@ class Sync:
             weekly_macd_score=weekly_macd_score,
         )
 
-        strategy_two_score = self._calculate_strategy_two_score(
-            strategy_one_score,
+        raw_macd_strategy_score = self._calculate_macd_strategy_score(
             stock_data.date,
             previous_stock_data,
+            stock_data.daily_macd_histogram,
+            stock_data.weekly_macd_histogram,
+            stock_data.daily_macd_velocity,
+            stock_data.weekly_macd_velocity,
         )
+
+        original_strategy_score = self._normalizeScore(raw_original_strategy_score, -9, 9)
+        macd_strategy_score = self._normalizeScore(raw_macd_strategy_score, -4, 4)
 
         return {
             "support_resistance_score": support_resistance_score,
@@ -1247,8 +1272,8 @@ class Sync:
             "ma_50d_score": ma_50d_score,
             "daily_macd_score": daily_macd_score,
             "weekly_macd_score": weekly_macd_score,
-            "strategy_one_score": strategy_one_score,
-            "strategy_two_score": strategy_two_score,
+            "original_strategy_score": original_strategy_score,
+            "macd_strategy_score": macd_strategy_score,
         }
 
     def _get_macd_velocity(self, macd, previous_macd):
@@ -1265,7 +1290,7 @@ class Sync:
             return -2
         return 0
 
-    def _calculate_strategy_one_score(
+    def _calculate_original_strategy_score(
         self,
         support_resistance_score,
         ma_50d_score,
@@ -1283,45 +1308,136 @@ class Sync:
             + weekly_macd_score
         )
 
-    def _calculate_strategy_two_score(self, strategy_one_score, current_date, recent_stock_data):
-        if strategy_one_score is None:
+    def _normalizeScore(self, score, minimum, maximum):
+        if score is None:
             return None
 
-        scores_by_market_day = {}
-        current_market_day = timezone.localtime(current_date, MARKET_TIMEZONE).date()
-        scores_by_market_day.setdefault(current_market_day, []).append(
-            Decimal(str(strategy_one_score))
-        )
+        minimum_decimal = Decimal(str(minimum))
+        maximum_decimal = Decimal(str(maximum))
 
-        for stock_data in recent_stock_data:
-            historical_score = (
-                stock_data.get("strategy_one_score")
-                if isinstance(stock_data, dict)
-                else stock_data.strategy_one_score
-            )
-            historical_date = (
-                stock_data.get("date")
-                if isinstance(stock_data, dict)
-                else stock_data.date
-            )
+        if maximum_decimal == minimum_decimal:
+            return None
 
-            if historical_score is None or historical_date is None:
+        normalized_score = ((Decimal(str(score)) - minimum_decimal) / (maximum_decimal - minimum_decimal)) * Decimal("100")
+
+        if normalized_score < Decimal("0"):
+            return Decimal("0")
+        if normalized_score > Decimal("100"):
+            return Decimal("100")
+
+        return normalized_score
+
+    def _get_market_day(self, value):
+        if value is None:
+            return None
+
+        # Django timezone.localtime() will convert the value to the MARKET_TIMEZONE.
+        localized_value = timezone.localtime(value, MARKET_TIMEZONE)
+
+        # return a date object representing the market day (ignoring time)
+        return localized_value.date()
+
+    def _limit_recent_history_to_market_days(self, history, day_count):
+        recent_history = []
+        seen_market_days = []
+
+        for history_item in reversed(history):
+            market_day = self._get_market_day(history_item.get("date"))
+            if market_day is None:
                 continue
 
-            market_day = timezone.localtime(historical_date, MARKET_TIMEZONE).date()
-            scores_by_market_day.setdefault(market_day, []).append(
-                Decimal(str(historical_score))
+            if market_day not in seen_market_days:
+                if len(seen_market_days) >= day_count:
+                    break
+                seen_market_days.append(market_day)
+
+            recent_history.append(history_item)
+
+        recent_history.reverse()
+        return recent_history
+
+    def _get_three_day_average_velocity(
+        self,
+        current_date,
+        recent_stock_data,
+        field_name,
+        current_value,
+    ):
+        # Array of values. key is market date, value is array of velocity values
+        values_by_market_day = {}
+        current_market_day = self._get_market_day(current_date)
+
+        if current_market_day is not None and current_value is not None:
+
+            # Build dict (date -> velocity)
+            values_by_market_day.setdefault(current_market_day, []).append(
+                Decimal(str(current_value))
             )
 
-        market_days = sorted(scores_by_market_day.keys(), reverse=True)
-        if len(market_days) < 3:
+        for history_item in recent_stock_data:
+            market_day = self._get_market_day(history_item.get("date"))
+            metric_value = history_item.get(field_name)
+
+            if market_day is None or metric_value is None:
+                continue
+
+            values_by_market_day.setdefault(market_day, []).append(
+                Decimal(str(metric_value))
+            )
+
+        recent_market_days = sorted(values_by_market_day.keys(), reverse=True)[:3]
+        recent_values = [
+            metric_value
+            for market_day in recent_market_days
+            for metric_value in values_by_market_day[market_day]
+        ]
+
+        if not recent_values:
             return None
 
-        three_day_scores = []
-        for market_day in market_days[:3]:
-            three_day_scores.extend(scores_by_market_day[market_day])
+        return sum(recent_values, Decimal("0")) / Decimal(str(len(recent_values)))
 
-        if not three_day_scores:
-            return None
+    def _score_from_sign(self, value):
+        if value is None:
+            return 0
 
-        return sum(three_day_scores) / Decimal(str(len(three_day_scores)))
+        numeric_value = Decimal(str(value))
+        if numeric_value > 0:
+            return 1
+        if numeric_value < 0:
+            return -1
+        return 0
+
+    def _calculate_macd_strategy_score(
+        self,
+        current_date,
+        recent_stock_data,
+        daily_macd_histogram,
+        weekly_macd_histogram,
+        daily_macd_velocity,
+        weekly_macd_velocity,
+    ):
+        daily_three_day_velocity = self._get_three_day_average_velocity(
+            current_date=current_date,
+            recent_stock_data=recent_stock_data,
+            field_name="daily_macd_velocity",
+            current_value=daily_macd_velocity,
+        )
+        weekly_three_day_velocity = self._get_three_day_average_velocity(
+            current_date=current_date,
+            recent_stock_data=recent_stock_data,
+            field_name="weekly_macd_velocity",
+            current_value=weekly_macd_velocity,
+        )
+
+        return (
+            self._score_from_sign(daily_macd_histogram)
+            + self._score_from_sign(weekly_macd_histogram)
+            + self._score_from_sign(daily_three_day_velocity)
+            + self._score_from_sign(weekly_three_day_velocity)
+        )
+
+
+
+
+

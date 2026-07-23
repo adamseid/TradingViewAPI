@@ -399,8 +399,6 @@ class Token:
             "industry": stock_data.stock.industry,
             "image_url": stock_data.stock.image_url,
             "date": stock_data.date,
-            "strategy_one_direction": self._calculate_direction(stock_data.strategy_one_score),
-            "strategy_two_direction": self._calculate_direction(stock_data.strategy_two_score),
             "current_price": stock_data.current_price,
             "price_change": stock_data.price_change,
             "support": stock_data.support,
@@ -414,8 +412,8 @@ class Token:
             "daily_macd_score": stock_data.daily_macd_score,
             "weekly_macd_velocity": stock_data.weekly_macd_velocity,
             "weekly_macd_score": stock_data.weekly_macd_score,
-            "strategy_one_score": stock_data.strategy_one_score,
-            "strategy_two_score": stock_data.strategy_two_score,
+            "original_strategy_score": stock_data.original_strategy_score,
+            "macd_strategy_score": stock_data.macd_strategy_score,
             "kinematics_score": 0,
             "five_day_velocity_score": 0,
             "five_day_acceleration_score": 0,
@@ -448,24 +446,10 @@ class Token:
             "weekly_macd_histogram": stock_data.weekly_macd_histogram,
             "weekly_macd_velocity": stock_data.weekly_macd_velocity,
             "weekly_macd_score": stock_data.weekly_macd_score,
-            "strategy_one_score": stock_data.strategy_one_score,
-            "strategy_two_score": stock_data.strategy_two_score,
-            "strategy_one_direction": self._calculate_direction(stock_data.strategy_one_score),
-            "strategy_two_direction": self._calculate_direction(stock_data.strategy_two_score),
+            "original_strategy_score": stock_data.original_strategy_score,
+            "macd_strategy_score": stock_data.macd_strategy_score
         }
 
-    def _calculate_direction(self, total_score):
-        if total_score is None:
-            return None
-        if total_score > 4:
-            return 2
-        if total_score > 2:
-            return 1
-        if total_score < -4:
-            return -2
-        if total_score < -2:
-            return -1
-        return 0
 
     def _present_stock_for_response(self, stock):
         return {
@@ -494,3 +478,4 @@ class Token:
             "in_use": stock.in_use,
             "image_url": stock.image_url,
         }
+
