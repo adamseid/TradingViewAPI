@@ -414,6 +414,7 @@ class Token:
             "weekly_macd_score": stock_data.weekly_macd_score,
             "original_strategy_score": stock_data.original_strategy_score,
             "macd_strategy_score": stock_data.macd_strategy_score,
+            "strategy_three_score": stock_data.strategy_three_score,
             "kinematics_score": 0,
             "five_day_velocity_score": 0,
             "five_day_acceleration_score": 0,
@@ -447,7 +448,8 @@ class Token:
             "weekly_macd_velocity": stock_data.weekly_macd_velocity,
             "weekly_macd_score": stock_data.weekly_macd_score,
             "original_strategy_score": stock_data.original_strategy_score,
-            "macd_strategy_score": stock_data.macd_strategy_score
+            "macd_strategy_score": stock_data.macd_strategy_score,
+            "strategy_three_score": stock_data.strategy_three_score,
         }
 
 

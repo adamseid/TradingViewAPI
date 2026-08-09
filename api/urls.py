@@ -29,11 +29,11 @@ urlpatterns = [
 
     # token
     path("", home_page, name="home_page"),
-    path("token/<str:ticker>/", token_detail, name="token_detail"),
     path("token/search/", token_search, name="token_search"),
     path("token/edit-options/", list_stocks_for_edit, name="list_stocks_for_edit"),
     path("token/create/", insert_individual_token, name="insert_individual_token"),
     path("token/<int:stock_id>/update/", update_individual_token, name="update_individual_token"),
+    path("token/<str:ticker>/", token_detail, name="token_detail"),
 
     # wishlist
     path("token/wishlist/toggle/", toggle_wishlist, name="toggle_wishlist"),
