@@ -574,6 +574,9 @@ class Sync:
                 score,
             ]
 
+            if score == "strategy_three_score":
+                fields_to_update.append("market_regime")
+
             for stock_data in stock_data_rows:
                 recalculated_values = self._build_recalculated_score_values(
                     stock_data=stock_data,
@@ -593,6 +596,7 @@ class Sync:
                     stock_data.macd_strategy_score = recalculated_values["macd_strategy_score"]
                 else:
                     stock_data.strategy_three_score = recalculated_values["strategy_three_score"]
+                    stock_data.market_regime = recalculated_values["market_regime"]
 
                 recent_macd_history = recent_macd_history_by_stock_id.setdefault(stock_data.stock_id, [])
                 recent_macd_history.append(self._build_history_snapshot(stock_data))
@@ -999,9 +1003,12 @@ class Sync:
             adx=daily_stock_analysis.indicators.get("ADX"),
             daily_macd_histogram=daily_macd_histogram,
             weekly_macd_histogram=weekly_macd_histogram,
+            adx_di_positive=daily_stock_analysis.indicators.get("ADX+DI"),
+            adx_di_negative=daily_stock_analysis.indicators.get("ADX-DI"),
             ema_20=daily_stock_analysis.indicators.get("EMA20"),
             ema_50=daily_stock_analysis.indicators.get("EMA50"),
             ema_100=daily_stock_analysis.indicators.get("EMA100"),
+            ema_200=daily_stock_analysis.indicators.get("EMA200"),
             bollinger_bands_lower=daily_stock_analysis.indicators.get("BB.lower"),
             bollinger_bands_upper=daily_stock_analysis.indicators.get("BB.upper"),
         )
@@ -1063,6 +1070,7 @@ class Sync:
             "original_strategy_score": original_strategy_score,
             "macd_strategy_score": macd_strategy_score,
             "strategy_three_score": strategy_three_score,
+            "market_regime": strategy_three_regime,
             "stock": stock,
         }
 
@@ -1313,9 +1321,12 @@ class Sync:
             adx=stock_data.adx,
             daily_macd_histogram=stock_data.daily_macd_histogram,
             weekly_macd_histogram=stock_data.weekly_macd_histogram,
+            adx_di_positive=stock_data.adx_di_positive,
+            adx_di_negative=stock_data.adx_di_negative,
             ema_20=stock_data.ema_20,
             ema_50=stock_data.ema_50,
             ema_100=stock_data.ema_100,
+            ema_200=stock_data.ema_200,
             bollinger_bands_lower=stock_data.bollinger_bands_lower,
             bollinger_bands_upper=stock_data.bollinger_bands_upper,
         )
@@ -1368,6 +1379,7 @@ class Sync:
             "original_strategy_score": original_strategy_score,
             "macd_strategy_score": macd_strategy_score,
             "strategy_three_score": strategy_three_score,
+            "market_regime": strategy_three_regime,
         }
 
     def _get_macd_velocity(self, macd, previous_macd):
@@ -1625,11 +1637,15 @@ class Sync:
         }
 
     def _get_strategy_three_score_bounds(self, regime):
-        if regime == "trend":
-            return -10, 10
-        if regime == "range":
-            return -8, 8
-        return -6, 6
+        bounds_by_regime = {
+            "bull_quiet": (-12, 12),
+            "bull_volatile": (-10, 10),
+            "bear_quiet": (-12, 12),
+            "bear_volatile": (-10, 10),
+            "sideways_quiet": (-8, 8),
+            "sideways_volatile": (-6, 6),
+        }
+        return bounds_by_regime.get(regime, (-8, 8))
 
     def _get_market_day(self, value):
         if value is None:
@@ -1712,6 +1728,331 @@ class Sync:
             return -1
         return 0
 
+    def _clamp_score(self, score, minimum, maximum):
+        return max(minimum, min(maximum, score))
+
+    def _move_score_toward_zero(self, score, amount=1):
+        if score > 0:
+            return max(0, score - amount)
+        if score < 0:
+            return min(0, score + amount)
+        return 0
+
+    def _get_volatility_state(self, current_width, recent_width_average):
+        current_width_decimal = self._to_decimal(current_width)
+        recent_width_average_decimal = self._to_decimal(recent_width_average)
+
+        if current_width_decimal is None:
+            return "quiet"
+
+        if recent_width_average_decimal is None or recent_width_average_decimal <= 0:
+            return "volatile" if current_width_decimal >= Decimal("0.08") else "quiet"
+
+        if current_width_decimal >= recent_width_average_decimal * Decimal("1.10"):
+            return "volatile"
+
+        return "quiet"
+
+    def _get_directional_bias_sign(
+        self,
+        recent_stock_data,
+        current_price,
+        daily_macd_histogram,
+        weekly_macd_histogram,
+        adx_di_positive,
+        adx_di_negative,
+        ema_50,
+        ema_100,
+        ema_200,
+    ):
+        score = 0
+        ema_50_decimal = self._to_decimal(ema_50)
+        ema_100_decimal = self._to_decimal(ema_100)
+        ema_200_decimal = self._to_decimal(ema_200)
+        adx_di_positive_decimal = self._to_decimal(adx_di_positive)
+        adx_di_negative_decimal = self._to_decimal(adx_di_negative)
+
+        if ema_50_decimal is not None and ema_100_decimal is not None:
+            score += 1 if ema_50_decimal > ema_100_decimal else -1 if ema_50_decimal < ema_100_decimal else 0
+
+        if ema_100_decimal is not None and ema_200_decimal is not None:
+            score += 1 if ema_100_decimal > ema_200_decimal else -1 if ema_100_decimal < ema_200_decimal else 0
+
+        score += self._score_from_sign(weekly_macd_histogram)
+        score += self._score_from_sign(daily_macd_histogram)
+
+        if adx_di_positive_decimal is not None and adx_di_negative_decimal is not None:
+            if adx_di_positive_decimal > adx_di_negative_decimal:
+                score += 1
+            elif adx_di_negative_decimal > adx_di_positive_decimal:
+                score -= 1
+
+        ema_50_velocity_10d = self._get_velocity_from_history(
+            ema_50,
+            recent_stock_data,
+            "ema_50",
+            9,
+            current_price,
+        )
+        ema_100_velocity_15d = self._get_velocity_from_history(
+            ema_100,
+            recent_stock_data,
+            "ema_100",
+            14,
+            current_price,
+        )
+
+        if (
+            ema_50_velocity_10d is not None
+            and ema_100_velocity_15d is not None
+            and self._score_from_sign(ema_50_velocity_10d) == self._score_from_sign(ema_100_velocity_15d)
+        ):
+            score += self._score_from_sign(ema_50_velocity_10d)
+
+        return self._score_from_sign(score)
+
+    def _get_trend_bias_score(
+        self,
+        recent_stock_data,
+        current_price,
+        weekly_macd_histogram,
+        adx_di_positive,
+        adx_di_negative,
+        ema_50,
+        ema_100,
+        ema_200,
+    ):
+        score = 0
+        ema_50_decimal = self._to_decimal(ema_50)
+        ema_100_decimal = self._to_decimal(ema_100)
+        ema_200_decimal = self._to_decimal(ema_200)
+        adx_di_positive_decimal = self._to_decimal(adx_di_positive)
+        adx_di_negative_decimal = self._to_decimal(adx_di_negative)
+
+        if ema_50_decimal is not None and ema_100_decimal is not None:
+            score += 1 if ema_50_decimal > ema_100_decimal else -1 if ema_50_decimal < ema_100_decimal else 0
+
+        if ema_100_decimal is not None and ema_200_decimal is not None:
+            score += 1 if ema_100_decimal > ema_200_decimal else -1 if ema_100_decimal < ema_200_decimal else 0
+
+        score += self._score_from_sign(weekly_macd_histogram)
+
+        if adx_di_positive_decimal is not None and adx_di_negative_decimal is not None:
+            if adx_di_positive_decimal > adx_di_negative_decimal:
+                score += 1
+            elif adx_di_negative_decimal > adx_di_positive_decimal:
+                score -= 1
+
+        ema_50_velocity_10d = self._get_velocity_from_history(
+            ema_50,
+            recent_stock_data,
+            "ema_50",
+            9,
+            current_price,
+        )
+        ema_100_velocity_15d = self._get_velocity_from_history(
+            ema_100,
+            recent_stock_data,
+            "ema_100",
+            14,
+            current_price,
+        )
+        if (
+            ema_50_velocity_10d is not None
+            and ema_100_velocity_15d is not None
+            and self._score_from_sign(ema_50_velocity_10d) == self._score_from_sign(ema_100_velocity_15d)
+        ):
+            velocity_sign = self._score_from_sign(ema_50_velocity_10d)
+            if abs(ema_50_velocity_10d) >= Decimal("0.003"):
+                score += velocity_sign * 2
+            elif velocity_sign != 0:
+                score += velocity_sign
+
+        return self._clamp_score(score, -6, 6)
+
+    def _get_momentum_confirmation_score(
+        self,
+        daily_macd_histogram,
+        weekly_macd_histogram,
+        daily_macd_velocity,
+        weekly_macd_velocity,
+    ):
+        score = 0
+        daily_hist_sign = self._score_from_sign(daily_macd_histogram)
+        weekly_hist_sign = self._score_from_sign(weekly_macd_histogram)
+        daily_velocity_sign = self._score_from_sign(daily_macd_velocity)
+        weekly_velocity_sign = self._score_from_sign(weekly_macd_velocity)
+
+        score += daily_hist_sign
+        score += daily_velocity_sign
+        score += weekly_hist_sign
+
+        if weekly_velocity_sign == daily_velocity_sign and weekly_velocity_sign != 0:
+            score += weekly_velocity_sign
+
+        return self._clamp_score(score, -4, 4)
+
+    def _get_bull_pullback_score(
+        self,
+        current_price,
+        support,
+        ema_20,
+        ema_50,
+        rsi,
+    ):
+        score = 0
+        current_price_decimal = self._to_decimal(current_price)
+        ema_50_decimal = self._to_decimal(ema_50)
+        rsi_decimal = self._to_decimal(rsi)
+        support_distance = self._get_distance_percent(current_price, support)
+        ema_20_distance = self._get_distance_percent(current_price, ema_20)
+
+        if (
+            current_price_decimal is not None
+            and ema_50_decimal is not None
+            and current_price_decimal >= ema_50_decimal
+            and rsi_decimal is not None
+            and rsi_decimal <= Decimal("68")
+            and (
+                (ema_20_distance is not None and ema_20_distance <= Decimal("0.02"))
+                or (support_distance is not None and support_distance <= Decimal("0.025"))
+            )
+        ):
+            score += 2
+
+        if rsi_decimal is not None and rsi_decimal >= Decimal("75"):
+            score -= 1
+
+        return score
+
+    def _get_bear_pullback_score(
+        self,
+        current_price,
+        resistance,
+        ema_20,
+        ema_50,
+        rsi,
+    ):
+        score = 0
+        current_price_decimal = self._to_decimal(current_price)
+        ema_50_decimal = self._to_decimal(ema_50)
+        rsi_decimal = self._to_decimal(rsi)
+        resistance_distance = self._get_distance_percent(current_price, resistance)
+        ema_20_distance = self._get_distance_percent(current_price, ema_20)
+
+        if (
+            current_price_decimal is not None
+            and ema_50_decimal is not None
+            and current_price_decimal <= ema_50_decimal
+            and rsi_decimal is not None
+            and rsi_decimal >= Decimal("32")
+            and (
+                (ema_20_distance is not None and ema_20_distance <= Decimal("0.02"))
+                or (resistance_distance is not None and resistance_distance <= Decimal("0.025"))
+            )
+        ):
+            score -= 2
+
+        if rsi_decimal is not None and rsi_decimal <= Decimal("25"):
+            score += 1
+
+        return score
+
+    def _get_range_setup_score(
+        self,
+        current_price,
+        support,
+        resistance,
+        pivot_classic_middle,
+        pivot_classic_s2,
+        pivot_classic_s3,
+        pivot_classic_r2,
+        pivot_classic_r3,
+        daily_macd_velocity,
+        rsi,
+        yesterday_rsi,
+        stoch_rsi_k,
+        adx,
+    ):
+        score = 0
+        level_data = self._get_nearest_price_levels(
+            current_price,
+            support,
+            resistance,
+            pivot_classic_middle,
+            pivot_classic_s2,
+            pivot_classic_s3,
+            pivot_classic_r2,
+            pivot_classic_r3,
+        )
+        rsi_decimal = self._to_decimal(rsi)
+        yesterday_rsi_decimal = self._to_decimal(yesterday_rsi)
+        stoch_rsi_decimal = self._to_decimal(stoch_rsi_k)
+        adx_decimal = self._to_decimal(adx)
+        daily_velocity_sign = self._score_from_sign(daily_macd_velocity)
+        location_bias = 0
+
+        support_distance = level_data["support_distance"]
+        resistance_distance = level_data["resistance_distance"]
+
+        if support_distance is not None and support_distance <= Decimal("0.01"):
+            score += 3
+            location_bias = 1
+        elif support_distance is not None and support_distance <= Decimal("0.02"):
+            score += 2
+            location_bias = 1
+        elif support_distance is not None and support_distance <= Decimal("0.03"):
+            score += 1
+            location_bias = 1
+
+        if resistance_distance is not None and resistance_distance <= Decimal("0.01"):
+            score -= 3
+            location_bias = -1
+        elif resistance_distance is not None and resistance_distance <= Decimal("0.02"):
+            score -= 2
+            location_bias = -1
+        elif resistance_distance is not None and resistance_distance <= Decimal("0.03"):
+            score -= 1
+            location_bias = -1
+
+        if support_distance is not None and resistance_distance is not None:
+            if support_distance < resistance_distance:
+                location_bias = 1
+            elif resistance_distance < support_distance:
+                location_bias = -1
+
+        if rsi_decimal is not None:
+            if rsi_decimal <= Decimal("30"):
+                score += 2
+            elif rsi_decimal <= Decimal("35"):
+                score += 1
+            elif rsi_decimal >= Decimal("70"):
+                score -= 2
+            elif rsi_decimal >= Decimal("65"):
+                score -= 1
+
+        if rsi_decimal is not None and yesterday_rsi_decimal is not None:
+            if location_bias > 0 and rsi_decimal > yesterday_rsi_decimal:
+                score += 1
+            elif location_bias < 0 and rsi_decimal < yesterday_rsi_decimal:
+                score -= 1
+
+        if stoch_rsi_decimal is not None:
+            if stoch_rsi_decimal <= Decimal("20") and daily_velocity_sign > 0:
+                score += 1
+            elif stoch_rsi_decimal >= Decimal("80") and daily_velocity_sign < 0:
+                score -= 1
+
+        if adx_decimal is not None and adx_decimal < Decimal("20") and location_bias != 0:
+            score += location_bias
+
+        if location_bias > 0 and daily_velocity_sign > 0:
+            score += 1
+        elif location_bias < 0 and daily_velocity_sign < 0:
+            score -= 1
+
+        return self._clamp_score(score, -8, 8)
+
     def _detect_market_regime(
         self,
         recent_stock_data,
@@ -1719,9 +2060,12 @@ class Sync:
         adx,
         daily_macd_histogram,
         weekly_macd_histogram,
+        adx_di_positive,
+        adx_di_negative,
         ema_20,
         ema_50,
         ema_100,
+        ema_200,
         bollinger_bands_lower,
         bollinger_bands_upper,
     ):
@@ -1755,19 +2099,31 @@ class Sync:
         )
 
         trend_checks = 0
-        range_checks = 0
+        sideways_checks = 0
         daily_macd_sign = self._score_from_sign(daily_macd_histogram)
         weekly_macd_sign = self._score_from_sign(weekly_macd_histogram)
+        direction_sign = self._get_directional_bias_sign(
+            recent_stock_data=recent_stock_data,
+            current_price=current_price,
+            daily_macd_histogram=daily_macd_histogram,
+            weekly_macd_histogram=weekly_macd_histogram,
+            adx_di_positive=adx_di_positive,
+            adx_di_negative=adx_di_negative,
+            ema_50=ema_50,
+            ema_100=ema_100,
+            ema_200=ema_200,
+        )
+        volatility_state = self._get_volatility_state(current_width, recent_width_average)
 
         if adx_decimal is not None and adx_decimal >= Decimal("25"):
-            trend_checks += 1
-        if adx_decimal is not None and adx_decimal < Decimal("18"):
-            range_checks += 1
+            trend_checks += 2
+        if adx_decimal is not None and adx_decimal < Decimal("20"):
+            sideways_checks += 2
 
         if daily_macd_sign != 0 and daily_macd_sign == weekly_macd_sign:
             trend_checks += 1
         if daily_macd_sign == 0 or weekly_macd_sign == 0 or daily_macd_sign != weekly_macd_sign:
-            range_checks += 1
+            sideways_checks += 1
 
         if (
             ema_50_velocity_10d is not None
@@ -1784,12 +2140,12 @@ class Sync:
             and abs(ema_20_velocity_5d) <= Decimal("0.004")
             and abs(ema_50_velocity_10d) <= Decimal("0.004")
         ):
-            range_checks += 1
+            sideways_checks += 1
 
         if (
             current_width is not None
             and recent_width_average is not None
-            and current_width >= recent_width_average * Decimal("0.90")
+            and current_width >= recent_width_average * Decimal("1.10")
         ):
             trend_checks += 1
 
@@ -1798,23 +2154,29 @@ class Sync:
             and recent_width_average is not None
             and current_width <= recent_width_average * Decimal("1.10")
         ):
-            range_checks += 1
+            sideways_checks += 1
 
-        if trend_checks >= 3 and trend_checks > range_checks:
-            return "trend"
-        if range_checks >= 3 and range_checks > trend_checks:
-            return "range"
-        return "transition"
+        if abs(direction_sign) >= 1:
+            trend_checks += 1
+        else:
+            sideways_checks += 1
 
-    def _calculate_trend_algo_score(
+        if trend_checks > sideways_checks:
+            if direction_sign >= 0:
+                return f"bull_{volatility_state}"
+            return f"bear_{volatility_state}"
+
+        return f"sideways_{volatility_state}"
+
+    def _calculate_bull_quiet_algo_score(
         self,
         recent_stock_data,
         current_price,
         support,
-        resistance,
         daily_macd_histogram,
         weekly_macd_histogram,
         daily_macd_velocity,
+        weekly_macd_velocity,
         adx,
         adx_di_positive,
         adx_di_negative,
@@ -1824,140 +2186,228 @@ class Sync:
         ema_200,
         rsi,
     ):
-        score = 0
-        ema_20_decimal = self._to_decimal(ema_20)
-        ema_50_decimal = self._to_decimal(ema_50)
-        ema_100_decimal = self._to_decimal(ema_100)
-        ema_200_decimal = self._to_decimal(ema_200)
-        current_price_decimal = self._to_decimal(current_price)
+        score = self._get_trend_bias_score(
+            recent_stock_data=recent_stock_data,
+            current_price=current_price,
+            weekly_macd_histogram=weekly_macd_histogram,
+            adx_di_positive=adx_di_positive,
+            adx_di_negative=adx_di_negative,
+            ema_50=ema_50,
+            ema_100=ema_100,
+            ema_200=ema_200,
+        )
+        score += self._get_momentum_confirmation_score(
+            daily_macd_histogram=daily_macd_histogram,
+            weekly_macd_histogram=weekly_macd_histogram,
+            daily_macd_velocity=daily_macd_velocity,
+            weekly_macd_velocity=weekly_macd_velocity,
+        )
+        score += self._get_bull_pullback_score(
+            current_price=current_price,
+            support=support,
+            ema_20=ema_20,
+            ema_50=ema_50,
+            rsi=rsi,
+        )
         adx_decimal = self._to_decimal(adx)
-        adx_di_positive_decimal = self._to_decimal(adx_di_positive)
-        adx_di_negative_decimal = self._to_decimal(adx_di_negative)
         rsi_decimal = self._to_decimal(rsi)
 
-        bullish_weekly_bias = 0
-        bearish_weekly_bias = 0
-
-        if (
-            ema_50_decimal is not None
-            and ema_100_decimal is not None
-            and ema_50_decimal > ema_100_decimal
-        ):
-            bullish_weekly_bias += 1
-        elif (
-            ema_50_decimal is not None
-            and ema_100_decimal is not None
-            and ema_50_decimal < ema_100_decimal
-        ):
-            bearish_weekly_bias += 1
-
-        if (
-            ema_100_decimal is not None
-            and ema_200_decimal is not None
-            and ema_100_decimal > ema_200_decimal
-        ):
-            bullish_weekly_bias += 1
-        elif (
-            ema_100_decimal is not None
-            and ema_200_decimal is not None
-            and ema_100_decimal < ema_200_decimal
-        ):
-            bearish_weekly_bias += 1
-
-        weekly_macd_sign = self._score_from_sign(weekly_macd_histogram)
-        if weekly_macd_sign > 0:
-            bullish_weekly_bias += 1
-        elif weekly_macd_sign < 0:
-            bearish_weekly_bias += 1
-
-        if bullish_weekly_bias > bearish_weekly_bias:
-            score += bullish_weekly_bias
-        elif bearish_weekly_bias > bullish_weekly_bias:
-            score -= bearish_weekly_bias
-
-        bias_sign = 1 if score > 0 else -1 if score < 0 else 0
-
-        ema_50_velocity_10d = self._get_velocity_from_history(
-            ema_50,
-            recent_stock_data,
-            "ema_50",
-            9,
-            current_price,
-        )
-        ema_100_velocity_15d = self._get_velocity_from_history(
-            ema_100,
-            recent_stock_data,
-            "ema_100",
-            14,
-            current_price,
-        )
-
-        if (
-            ema_50_velocity_10d is not None
-            and ema_100_velocity_15d is not None
-            and self._score_from_sign(ema_50_velocity_10d) == self._score_from_sign(ema_100_velocity_15d)
-        ):
-            velocity_sign = self._score_from_sign(ema_50_velocity_10d)
-            if velocity_sign > 0 and abs(ema_50_velocity_10d) >= Decimal("0.003"):
-                score += 2
-            elif velocity_sign < 0 and abs(ema_50_velocity_10d) >= Decimal("0.003"):
-                score -= 2
-
-        daily_hist_sign = self._score_from_sign(daily_macd_histogram)
-        daily_velocity_sign = self._score_from_sign(daily_macd_velocity)
-        if daily_hist_sign > 0 and daily_velocity_sign > 0:
-            score += 2
-        elif daily_hist_sign < 0 and daily_velocity_sign < 0:
-            score -= 2
-        elif daily_hist_sign > 0 or daily_velocity_sign > 0:
+        if adx_decimal is not None and adx_decimal >= Decimal("25"):
             score += 1
-        elif daily_hist_sign < 0 or daily_velocity_sign < 0:
+        if rsi_decimal is not None and rsi_decimal <= Decimal("60"):
+            score += 1
+
+        return self._clamp_score(score, -12, 12)
+
+    def _calculate_bull_volatile_algo_score(
+        self,
+        recent_stock_data,
+        current_price,
+        support,
+        daily_macd_histogram,
+        weekly_macd_histogram,
+        daily_macd_velocity,
+        weekly_macd_velocity,
+        adx,
+        adx_di_positive,
+        adx_di_negative,
+        ema_20,
+        ema_50,
+        ema_100,
+        ema_200,
+        rsi,
+        bollinger_bands_lower,
+        bollinger_bands_upper,
+    ):
+        score = self._get_trend_bias_score(
+            recent_stock_data=recent_stock_data,
+            current_price=current_price,
+            weekly_macd_histogram=weekly_macd_histogram,
+            adx_di_positive=adx_di_positive,
+            adx_di_negative=adx_di_negative,
+            ema_50=ema_50,
+            ema_100=ema_100,
+            ema_200=ema_200,
+        )
+        score += self._get_momentum_confirmation_score(
+            daily_macd_histogram=daily_macd_histogram,
+            weekly_macd_histogram=weekly_macd_histogram,
+            daily_macd_velocity=daily_macd_velocity,
+            weekly_macd_velocity=weekly_macd_velocity,
+        )
+        score += self._get_bull_pullback_score(
+            current_price=current_price,
+            support=support,
+            ema_20=ema_20,
+            ema_50=ema_50,
+            rsi=rsi,
+        )
+
+        adx_decimal = self._to_decimal(adx)
+        rsi_decimal = self._to_decimal(rsi)
+        current_width = self._get_bollinger_width(
+            current_price,
+            bollinger_bands_lower,
+            bollinger_bands_upper,
+        )
+        recent_width_average = self._get_average_history_bollinger_width(recent_stock_data)
+
+        if adx_decimal is not None and adx_decimal >= Decimal("30"):
+            score += 1
+        if self._score_from_sign(weekly_macd_velocity) > 0:
+            score += 1
+        if rsi_decimal is not None and rsi_decimal >= Decimal("72"):
+            score -= 2
+        if (
+            current_width is not None
+            and recent_width_average is not None
+            and current_width >= recent_width_average * Decimal("1.25")
+        ):
             score -= 1
 
-        support_distance = self._get_distance_percent(current_price, support)
-        resistance_distance = self._get_distance_percent(current_price, resistance)
-        ema_20_distance = self._get_distance_percent(current_price, ema_20)
-        if (
-            bias_sign > 0
-            and current_price_decimal is not None
-            and ema_50_decimal is not None
-            and current_price_decimal >= ema_50_decimal
-            and rsi_decimal is not None
-            and rsi_decimal <= Decimal("65")
-            and (
-                (ema_20_distance is not None and ema_20_distance <= Decimal("0.02"))
-                or (support_distance is not None and support_distance <= Decimal("0.02"))
-            )
-        ):
+        return self._clamp_score(score, -10, 10)
+
+    def _calculate_bear_quiet_algo_score(
+        self,
+        recent_stock_data,
+        current_price,
+        resistance,
+        daily_macd_histogram,
+        weekly_macd_histogram,
+        daily_macd_velocity,
+        weekly_macd_velocity,
+        adx,
+        adx_di_positive,
+        adx_di_negative,
+        ema_20,
+        ema_50,
+        ema_100,
+        ema_200,
+        rsi,
+    ):
+        score = self._get_trend_bias_score(
+            recent_stock_data=recent_stock_data,
+            current_price=current_price,
+            weekly_macd_histogram=weekly_macd_histogram,
+            adx_di_positive=adx_di_positive,
+            adx_di_negative=adx_di_negative,
+            ema_50=ema_50,
+            ema_100=ema_100,
+            ema_200=ema_200,
+        )
+        score += self._get_momentum_confirmation_score(
+            daily_macd_histogram=daily_macd_histogram,
+            weekly_macd_histogram=weekly_macd_histogram,
+            daily_macd_velocity=daily_macd_velocity,
+            weekly_macd_velocity=weekly_macd_velocity,
+        )
+        score += self._get_bear_pullback_score(
+            current_price=current_price,
+            resistance=resistance,
+            ema_20=ema_20,
+            ema_50=ema_50,
+            rsi=rsi,
+        )
+
+        adx_decimal = self._to_decimal(adx)
+        rsi_decimal = self._to_decimal(rsi)
+
+        if adx_decimal is not None and adx_decimal >= Decimal("25"):
+            score -= 1
+        if rsi_decimal is not None and rsi_decimal >= Decimal("40"):
+            score -= 1
+
+        return self._clamp_score(score, -12, 12)
+
+    def _calculate_bear_volatile_algo_score(
+        self,
+        recent_stock_data,
+        current_price,
+        resistance,
+        daily_macd_histogram,
+        weekly_macd_histogram,
+        daily_macd_velocity,
+        weekly_macd_velocity,
+        adx,
+        adx_di_positive,
+        adx_di_negative,
+        ema_20,
+        ema_50,
+        ema_100,
+        ema_200,
+        rsi,
+        bollinger_bands_lower,
+        bollinger_bands_upper,
+    ):
+        score = self._get_trend_bias_score(
+            recent_stock_data=recent_stock_data,
+            current_price=current_price,
+            weekly_macd_histogram=weekly_macd_histogram,
+            adx_di_positive=adx_di_positive,
+            adx_di_negative=adx_di_negative,
+            ema_50=ema_50,
+            ema_100=ema_100,
+            ema_200=ema_200,
+        )
+        score += self._get_momentum_confirmation_score(
+            daily_macd_histogram=daily_macd_histogram,
+            weekly_macd_histogram=weekly_macd_histogram,
+            daily_macd_velocity=daily_macd_velocity,
+            weekly_macd_velocity=weekly_macd_velocity,
+        )
+        score += self._get_bear_pullback_score(
+            current_price=current_price,
+            resistance=resistance,
+            ema_20=ema_20,
+            ema_50=ema_50,
+            rsi=rsi,
+        )
+
+        adx_decimal = self._to_decimal(adx)
+        rsi_decimal = self._to_decimal(rsi)
+        current_width = self._get_bollinger_width(
+            current_price,
+            bollinger_bands_lower,
+            bollinger_bands_upper,
+        )
+        recent_width_average = self._get_average_history_bollinger_width(recent_stock_data)
+
+        if adx_decimal is not None and adx_decimal >= Decimal("30"):
+            score -= 1
+        if self._score_from_sign(weekly_macd_velocity) < 0:
+            score -= 1
+        if rsi_decimal is not None and rsi_decimal <= Decimal("28"):
             score += 2
-        elif (
-            bias_sign < 0
-            and current_price_decimal is not None
-            and ema_50_decimal is not None
-            and current_price_decimal <= ema_50_decimal
-            and rsi_decimal is not None
-            and rsi_decimal >= Decimal("35")
-            and (
-                (ema_20_distance is not None and ema_20_distance <= Decimal("0.02"))
-                or (resistance_distance is not None and resistance_distance <= Decimal("0.02"))
-            )
-        ):
-            score -= 2
-
         if (
-            adx_decimal is not None
-            and adx_decimal >= Decimal("30")
-            and adx_di_positive_decimal is not None
-            and adx_di_negative_decimal is not None
+            current_width is not None
+            and recent_width_average is not None
+            and current_width >= recent_width_average * Decimal("1.25")
         ):
-            if adx_di_positive_decimal > adx_di_negative_decimal:
-                score += 1
-            elif adx_di_negative_decimal > adx_di_positive_decimal:
-                score -= 1
+            score += 1
 
-        return max(-10, min(10, score))
+        return self._clamp_score(score, -10, 10)
 
-    def _calculate_range_algo_score(
+    def _calculate_sideways_quiet_algo_score(
         self,
         current_price,
         support,
@@ -1969,11 +2419,11 @@ class Sync:
         pivot_classic_r3,
         daily_macd_velocity,
         rsi,
+        yesterday_rsi,
         stoch_rsi_k,
         adx,
     ):
-        score = 0
-        level_data = self._get_nearest_price_levels(
+        score = self._get_range_setup_score(
             current_price,
             support,
             resistance,
@@ -1982,177 +2432,72 @@ class Sync:
             pivot_classic_s3,
             pivot_classic_r2,
             pivot_classic_r3,
+            daily_macd_velocity,
+            rsi,
+            yesterday_rsi,
+            stoch_rsi_k,
+            adx,
         )
-        rsi_decimal = self._to_decimal(rsi)
-        stoch_rsi_decimal = self._to_decimal(stoch_rsi_k)
         adx_decimal = self._to_decimal(adx)
-        location_bias = 0
 
-        support_distance = level_data["support_distance"]
-        resistance_distance = level_data["resistance_distance"]
+        if adx_decimal is not None and adx_decimal < Decimal("16") and score != 0:
+            score += self._score_from_sign(score)
 
-        if support_distance is not None and support_distance <= Decimal("0.01"):
-            score += 3
-            location_bias = 1
-        elif support_distance is not None and support_distance <= Decimal("0.02"):
-            score += 2
-            location_bias = 1
-        elif support_distance is not None and support_distance <= Decimal("0.03"):
-            score += 1
-            location_bias = 1
+        return self._clamp_score(score, -8, 8)
 
-        if resistance_distance is not None and resistance_distance <= Decimal("0.01"):
-            score -= 3
-            location_bias = -1
-        elif resistance_distance is not None and resistance_distance <= Decimal("0.02"):
-            score -= 2
-            location_bias = -1
-        elif resistance_distance is not None and resistance_distance <= Decimal("0.03"):
-            score -= 1
-            location_bias = -1
-
-        if (
-            support_distance is not None
-            and resistance_distance is not None
-            and support_distance < resistance_distance
-        ):
-            location_bias = 1
-        elif (
-            support_distance is not None
-            and resistance_distance is not None
-            and resistance_distance < support_distance
-        ):
-            location_bias = -1
-
-        if rsi_decimal is not None:
-            if rsi_decimal <= Decimal("30"):
-                score += 2
-            elif rsi_decimal <= Decimal("35"):
-                score += 1
-            elif rsi_decimal >= Decimal("70"):
-                score -= 2
-            elif rsi_decimal >= Decimal("65"):
-                score -= 1
-
-        if stoch_rsi_decimal is not None:
-            if stoch_rsi_decimal <= Decimal("20") and self._score_from_sign(daily_macd_velocity) > 0:
-                score += 1
-            elif stoch_rsi_decimal >= Decimal("80") and self._score_from_sign(daily_macd_velocity) < 0:
-                score -= 1
-
-        if adx_decimal is not None and adx_decimal < Decimal("18") and location_bias != 0:
-            score += location_bias
-
-        if location_bias > 0 and self._score_from_sign(daily_macd_velocity) > 0:
-            score += 1
-        elif location_bias < 0 and self._score_from_sign(daily_macd_velocity) < 0:
-            score -= 1
-
-        return max(-8, min(8, score))
-
-    def _calculate_transition_algo_score(
+    def _calculate_sideways_volatile_algo_score(
         self,
-        recent_stock_data,
         current_price,
         support,
         resistance,
         pivot_classic_middle,
-        daily_macd_histogram,
+        pivot_classic_s2,
+        pivot_classic_s3,
+        pivot_classic_r2,
+        pivot_classic_r3,
         daily_macd_velocity,
         rsi,
         yesterday_rsi,
+        stoch_rsi_k,
         adx,
-        ema_20,
-        ema_50,
+        weekly_macd_histogram,
+        bollinger_bands_lower,
+        bollinger_bands_upper,
     ):
-        score = 0
+        score = self._get_range_setup_score(
+            current_price,
+            support,
+            resistance,
+            pivot_classic_middle,
+            pivot_classic_s2,
+            pivot_classic_s3,
+            pivot_classic_r2,
+            pivot_classic_r3,
+            daily_macd_velocity,
+            rsi,
+            yesterday_rsi,
+            stoch_rsi_k,
+            adx,
+        )
+
         adx_decimal = self._to_decimal(adx)
-        rsi_decimal = self._to_decimal(rsi)
-        yesterday_rsi_decimal = self._to_decimal(yesterday_rsi)
-        current_price_decimal = self._to_decimal(current_price)
-        pivot_middle_decimal = self._to_decimal(pivot_classic_middle)
-        support_decimal = self._to_decimal(support)
-        resistance_decimal = self._to_decimal(resistance)
-
-        daily_hist_sign = self._score_from_sign(daily_macd_histogram)
-        daily_velocity_sign = self._score_from_sign(daily_macd_velocity)
-        if daily_hist_sign > 0 and daily_velocity_sign > 0:
-            score += 2
-        elif daily_hist_sign < 0 and daily_velocity_sign < 0:
-            score -= 2
-        elif daily_velocity_sign > 0:
-            score += 1
-        elif daily_velocity_sign < 0:
-            score -= 1
-
-        previous_adx = self._to_decimal(self._get_history_value(recent_stock_data, "adx", 4))
-        if (
-            adx_decimal is not None
-            and previous_adx is not None
-            and previous_adx < Decimal("20")
-            and adx_decimal > previous_adx
-        ):
-            score += daily_velocity_sign
-
-        ema_20_velocity_5d = self._get_velocity_from_history(
-            ema_20,
-            recent_stock_data,
-            "ema_20",
-            4,
+        current_width = self._get_bollinger_width(
             current_price,
+            bollinger_bands_lower,
+            bollinger_bands_upper,
         )
-        ema_50_velocity_10d = self._get_velocity_from_history(
-            ema_50,
-            recent_stock_data,
-            "ema_50",
-            9,
-            current_price,
-        )
-        if (
-            ema_20_velocity_5d is not None
-            and ema_50_velocity_10d is not None
-            and self._score_from_sign(ema_20_velocity_5d) == self._score_from_sign(daily_macd_velocity)
-            and abs(ema_20_velocity_5d) > abs(ema_50_velocity_10d)
-        ):
-            score += self._score_from_sign(ema_20_velocity_5d)
+        weekly_hist_sign = self._score_from_sign(weekly_macd_histogram)
 
-        if (
-            current_price_decimal is not None
-            and pivot_middle_decimal is not None
-            and daily_velocity_sign != 0
-        ):
-            if current_price_decimal > pivot_middle_decimal and daily_velocity_sign > 0:
-                score += 1
-            elif current_price_decimal < pivot_middle_decimal and daily_velocity_sign < 0:
-                score -= 1
-            elif (
-                resistance_decimal is not None
-                and current_price_decimal > resistance_decimal
-                and daily_velocity_sign > 0
-            ):
-                score += 1
-            elif (
-                support_decimal is not None
-                and current_price_decimal < support_decimal
-                and daily_velocity_sign < 0
-            ):
-                score -= 1
+        if adx_decimal is not None and adx_decimal >= Decimal("18"):
+            score = self._move_score_toward_zero(score, 1)
 
-        if rsi_decimal is not None and yesterday_rsi_decimal is not None:
-            if (
-                yesterday_rsi_decimal <= Decimal("35")
-                and rsi_decimal > yesterday_rsi_decimal
-                and daily_velocity_sign > 0
-            ):
-                score += 1
-            elif (
-                yesterday_rsi_decimal >= Decimal("65")
-                and rsi_decimal < yesterday_rsi_decimal
-                and daily_velocity_sign < 0
-            ):
-                score -= 1
+        if weekly_hist_sign != 0 and self._score_from_sign(score) == weekly_hist_sign:
+            score = self._move_score_toward_zero(score, 1)
 
-        return max(-6, min(6, score))
+        if current_width is not None and current_width >= Decimal("0.08"):
+            score = self._move_score_toward_zero(score, 1)
+
+        return self._clamp_score(score, -6, 6)
 
     def _calculate_strategy_three_score(
         self,
@@ -2188,22 +2533,25 @@ class Sync:
             adx=adx,
             daily_macd_histogram=daily_macd_histogram,
             weekly_macd_histogram=weekly_macd_histogram,
+            adx_di_positive=adx_di_positive,
+            adx_di_negative=adx_di_negative,
             ema_20=ema_20,
             ema_50=ema_50,
             ema_100=ema_100,
+            ema_200=ema_200,
             bollinger_bands_lower=bollinger_bands_lower,
             bollinger_bands_upper=bollinger_bands_upper,
         )
 
-        if regime == "trend":
-            return self._calculate_trend_algo_score(
+        if regime == "bull_quiet":
+            return self._calculate_bull_quiet_algo_score(
                 recent_stock_data=recent_stock_data,
                 current_price=current_price,
                 support=support,
-                resistance=resistance,
                 daily_macd_histogram=daily_macd_histogram,
                 weekly_macd_histogram=weekly_macd_histogram,
                 daily_macd_velocity=daily_macd_velocity,
+                weekly_macd_velocity=weekly_macd_velocity,
                 adx=adx,
                 adx_di_positive=adx_di_positive,
                 adx_di_negative=adx_di_negative,
@@ -2214,8 +2562,69 @@ class Sync:
                 rsi=rsi,
             )
 
-        if regime == "range":
-            return self._calculate_range_algo_score(
+        if regime == "bull_volatile":
+            return self._calculate_bull_volatile_algo_score(
+                recent_stock_data=recent_stock_data,
+                current_price=current_price,
+                support=support,
+                daily_macd_histogram=daily_macd_histogram,
+                weekly_macd_histogram=weekly_macd_histogram,
+                daily_macd_velocity=daily_macd_velocity,
+                weekly_macd_velocity=weekly_macd_velocity,
+                adx=adx,
+                adx_di_positive=adx_di_positive,
+                adx_di_negative=adx_di_negative,
+                ema_20=ema_20,
+                ema_50=ema_50,
+                ema_100=ema_100,
+                ema_200=ema_200,
+                rsi=rsi,
+                bollinger_bands_lower=bollinger_bands_lower,
+                bollinger_bands_upper=bollinger_bands_upper,
+            )
+
+        if regime == "bear_quiet":
+            return self._calculate_bear_quiet_algo_score(
+                recent_stock_data=recent_stock_data,
+                current_price=current_price,
+                resistance=resistance,
+                daily_macd_histogram=daily_macd_histogram,
+                weekly_macd_histogram=weekly_macd_histogram,
+                daily_macd_velocity=daily_macd_velocity,
+                weekly_macd_velocity=weekly_macd_velocity,
+                adx=adx,
+                adx_di_positive=adx_di_positive,
+                adx_di_negative=adx_di_negative,
+                ema_20=ema_20,
+                ema_50=ema_50,
+                ema_100=ema_100,
+                ema_200=ema_200,
+                rsi=rsi,
+            )
+
+        if regime == "bear_volatile":
+            return self._calculate_bear_volatile_algo_score(
+                recent_stock_data=recent_stock_data,
+                current_price=current_price,
+                resistance=resistance,
+                daily_macd_histogram=daily_macd_histogram,
+                weekly_macd_histogram=weekly_macd_histogram,
+                daily_macd_velocity=daily_macd_velocity,
+                weekly_macd_velocity=weekly_macd_velocity,
+                adx=adx,
+                adx_di_positive=adx_di_positive,
+                adx_di_negative=adx_di_negative,
+                ema_20=ema_20,
+                ema_50=ema_50,
+                ema_100=ema_100,
+                ema_200=ema_200,
+                rsi=rsi,
+                bollinger_bands_lower=bollinger_bands_lower,
+                bollinger_bands_upper=bollinger_bands_upper,
+            )
+
+        if regime == "sideways_quiet":
+            return self._calculate_sideways_quiet_algo_score(
                 current_price=current_price,
                 support=support,
                 resistance=resistance,
@@ -2226,23 +2635,28 @@ class Sync:
                 pivot_classic_r3=pivot_classic_r3,
                 daily_macd_velocity=daily_macd_velocity,
                 rsi=rsi,
+                yesterday_rsi=yesterday_rsi,
                 stoch_rsi_k=stoch_rsi_k,
                 adx=adx,
             )
 
-        return self._calculate_transition_algo_score(
-            recent_stock_data=recent_stock_data,
+        return self._calculate_sideways_volatile_algo_score(
             current_price=current_price,
             support=support,
             resistance=resistance,
             pivot_classic_middle=pivot_classic_middle,
-            daily_macd_histogram=daily_macd_histogram,
+            pivot_classic_s2=pivot_classic_s2,
+            pivot_classic_s3=pivot_classic_s3,
+            pivot_classic_r2=pivot_classic_r2,
+            pivot_classic_r3=pivot_classic_r3,
             daily_macd_velocity=daily_macd_velocity,
             rsi=rsi,
             yesterday_rsi=yesterday_rsi,
+            stoch_rsi_k=stoch_rsi_k,
             adx=adx,
-            ema_20=ema_20,
-            ema_50=ema_50,
+            weekly_macd_histogram=weekly_macd_histogram,
+            bollinger_bands_lower=bollinger_bands_lower,
+            bollinger_bands_upper=bollinger_bands_upper,
         )
 
     def _calculate_macd_strategy_score(

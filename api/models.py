@@ -136,6 +136,7 @@ class StockData(models.Model):
     original_strategy_score = models.DecimalField(max_digits=15, decimal_places=6, null=True)
     macd_strategy_score = models.DecimalField(max_digits=15, decimal_places=6, null=True)
     strategy_three_score = models.DecimalField(max_digits=15, decimal_places=6, null=True)
+    market_regime = models.CharField(max_length=20, null=True, blank=True)
 
     class Meta:
         db_table = "stock_data"
